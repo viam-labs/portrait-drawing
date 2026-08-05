@@ -3,6 +3,7 @@ package drawer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -14,6 +15,8 @@ import (
 	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/spatialmath"
+
+	"github.com/viam-labs/portrait-drawing/internal/verb"
 )
 
 // Model is the drawer service.
@@ -106,8 +109,65 @@ func (d *drawer) Name() resource.Name {
 	return d.name
 }
 
-func (d *drawer) DoCommand(_ context.Context, _ map[string]interface{}) (map[string]interface{}, error) {
-	return nil, errors.New("drawer: not implemented")
+// Polyline is an ordered sequence of 2D points drawn as one continuous stroke.
+// Points are in mm, in paper-local coordinates where (0,0) is the top-left corner.
+type Polyline [][2]float64
+
+type drawArgs struct {
+	Polylines [][][]float64 `json:"polylines"`
+}
+
+func parseDrawPayload(payload interface{}) ([]Polyline, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	var args drawArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	if len(args.Polylines) == 0 {
+		return nil, errors.New("polylines is required and must be non-empty")
+	}
+	out := make([]Polyline, len(args.Polylines))
+	for i, poly := range args.Polylines {
+		out[i] = make(Polyline, len(poly))
+		for j, pt := range poly {
+			if len(pt) != 2 {
+				return nil, fmt.Errorf("polyline %d point %d must have exactly 2 elements, got %d", i, j, len(pt))
+			}
+			out[i][j] = [2]float64{pt[0], pt[1]}
+		}
+	}
+	return out, nil
+}
+
+func (d *drawer) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	v, err := verb.Single(cmd)
+	if err != nil {
+		return nil, err
+	}
+	switch v {
+	case "draw":
+		return d.draw(cmd["draw"])
+	default:
+		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\"", v)
+	}
+}
+
+func (d *drawer) draw(payload interface{}) (map[string]interface{}, error) {
+	polylines, err := parseDrawPayload(payload)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	total := 0
+	for _, p := range polylines {
+		total += len(p)
+	}
+	d.logger.Infof("drawer: parsed %d polylines with %d total points (motion not yet implemented)", len(polylines), total)
+	return map[string]interface{}{
+		"total_points": total,
+	}, nil
 }
 
 func (d *drawer) Status(_ context.Context) (map[string]interface{}, error) {
