@@ -74,6 +74,19 @@ func TestConfigValidate_negativeLiftOff(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "lift_off_z_mm")
 }
 
+func TestConfigValidate_homePoseMissingOrientation(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		HomePose:           &poseConfig{Translation: r3.Vector{X: 1}},
+	}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "home_pose.orientation")
+}
+
 func TestConfigValidate_valid(t *testing.T) {
 	cfg := &Config{
 		Arm:                "my-arm",
