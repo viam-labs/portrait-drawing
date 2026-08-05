@@ -1,0 +1,17 @@
+.DS_Store
+*.swp
+
+# go build output
+bin
+*.exe
+
+# packaged module
+module.tar.gz
+
+# tmp
+tmp
+
+# local docs and research cache (not part of the module)
+docs
+
+.VIAM_RELOAD_ARCHIVE.tar.gz
