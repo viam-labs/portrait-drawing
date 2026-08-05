@@ -41,9 +41,12 @@ type Config struct {
 	// touches the paper's top-left corner. Orientation is reused for every
 	// waypoint so the pen keeps the same attitude across the whole drawing.
 	PaperTopLeftCorner *poseConfig                                `json:"paper_top_left_corner"`
-	PaperWidthMM       float64                                    `json:"paper_width_mm"`
-	PaperHeightMM      float64                                    `json:"paper_height_mm"`
-	LiftOffZMM         float64                                    `json:"lift_off_z_mm,omitempty"`
+	PaperWidthMM  float64 `json:"paper_width_mm"`
+	PaperHeightMM float64 `json:"paper_height_mm"`
+	LiftOffZMM    float64 `json:"lift_off_z_mm,omitempty"`
+	// HomePose, if set, is the tool pose the arm returns to after the last
+	// polyline is drawn.
+	HomePose           *poseConfig                                `json:"home_pose,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 }
 
@@ -78,6 +81,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.LiftOffZMM < 0 {
 		return nil, nil, fmt.Errorf("lift_off_z_mm must be >= 0 (0 uses the default), got %g", cfg.LiftOffZMM)
 	}
+	if cfg.HomePose != nil && cfg.HomePose.Orientation == nil {
+		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "home_pose.orientation")
+	}
 	return []string{cfg.Arm}, nil, nil
 }
 
@@ -91,6 +97,7 @@ type drawer struct {
 	arm                arm.Arm
 	fsService          framesystem.Service
 	paperTopLeftCorner spatialmath.Pose
+	homePose           spatialmath.Pose
 }
 
 func newDrawer(
@@ -118,6 +125,14 @@ func newDrawer(
 	if err != nil {
 		return nil, fmt.Errorf("drawer: parse paper_top_left_corner.orientation: %w", err)
 	}
+	var homePose spatialmath.Pose
+	if cfg.HomePose != nil {
+		homeOrientation, err := cfg.HomePose.Orientation.ParseConfig()
+		if err != nil {
+			return nil, fmt.Errorf("drawer: parse home_pose.orientation: %w", err)
+		}
+		homePose = spatialmath.NewPose(cfg.HomePose.Translation, homeOrientation)
+	}
 	return &drawer{
 		name:               conf.ResourceName(),
 		logger:             logger,
@@ -125,6 +140,7 @@ func newDrawer(
 		arm:                a,
 		fsService:          fsService,
 		paperTopLeftCorner: spatialmath.NewPose(cfg.PaperTopLeftCorner.Translation, orientation),
+		homePose:           homePose,
 	}, nil
 }
 
@@ -231,6 +247,12 @@ func (d *drawer) draw(ctx context.Context, payload interface{}) (map[string]inte
 			return nil, fmt.Errorf("drawer: polyline %d pen-up: %w", i, err)
 		}
 		total += len(poly)
+	}
+
+	if d.homePose != nil {
+		if err := d.planAndExecute(ctx, fs, d.homePose, nil); err != nil {
+			return nil, fmt.Errorf("drawer: return to home: %w", err)
+		}
 	}
 
 	return map[string]interface{}{
