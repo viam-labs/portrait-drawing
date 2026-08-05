@@ -64,3 +64,53 @@ func TestConfigValidate_valid(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, deps, test.ShouldResemble, []string{"my-arm"})
 }
+
+func TestParseDrawPayload_valid(t *testing.T) {
+	payload := map[string]interface{}{
+		"polylines": []interface{}{
+			[]interface{}{[]interface{}{0.0, 0.0}, []interface{}{10.0, 5.0}},
+			[]interface{}{[]interface{}{20.0, 20.0}},
+		},
+	}
+	got, err := parseDrawPayload(payload)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(got), test.ShouldEqual, 2)
+	test.That(t, len(got[0]), test.ShouldEqual, 2)
+	test.That(t, got[0][0], test.ShouldResemble, [2]float64{0, 0})
+	test.That(t, got[0][1], test.ShouldResemble, [2]float64{10, 5})
+	test.That(t, got[1][0], test.ShouldResemble, [2]float64{20, 20})
+}
+
+func TestParseDrawPayload_missingPolylines(t *testing.T) {
+	_, err := parseDrawPayload(map[string]interface{}{})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
+}
+
+func TestParseDrawPayload_emptyPolylines(t *testing.T) {
+	payload := map[string]interface{}{"polylines": []interface{}{}}
+	_, err := parseDrawPayload(payload)
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
+}
+
+func TestParseDrawPayload_wrongPointArity(t *testing.T) {
+	payload := map[string]interface{}{
+		"polylines": []interface{}{
+			[]interface{}{[]interface{}{0.0, 0.0, 5.0}},
+		},
+	}
+	_, err := parseDrawPayload(payload)
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "2 elements")
+}
+
+func TestParseDrawPayload_nonNumeric(t *testing.T) {
+	payload := map[string]interface{}{
+		"polylines": []interface{}{
+			[]interface{}{[]interface{}{"not a number", 0.0}},
+		},
+	}
+	_, err := parseDrawPayload(payload)
+	test.That(t, err, test.ShouldNotBeNil)
+}
