@@ -75,3 +75,36 @@ def test_rotate_ccw_invalid():
         pass
     else:
         raise AssertionError("expected ValueError for non-90-multiple rotation")
+
+
+def test_auto_rotate_picks_better_orientation():
+    """Landscape polyline on portrait paper should auto-rotate to 90°."""
+    # Wide landscape polyline: 200 wide x 20 tall (in pixel space)
+    landscape = [np.array([[10, 100], [210, 100], [210, 120], [10, 120]], np.int32).reshape(-1, 1, 2)]
+    # Portrait paper: 100 wide x 200 tall
+    auto = polylines_to_mm(landscape, 100, 200, 5, 0, False, auto_rotate=True)
+    fixed = polylines_to_mm(landscape, 100, 200, 5, 0, False, auto_rotate=False)
+    # After auto-rotate (90°), landscape drawing fits vertically → uses more paper.
+    # Widest span of auto output should be larger than fixed (portrait fit).
+    def span(pl):
+        xs = [x for line in pl for x, _ in line]
+        ys = [y for line in pl for _, y in line]
+        return max(xs) - min(xs), max(ys) - min(ys)
+    auto_w, auto_h = span(auto)
+    fixed_w, fixed_h = span(fixed)
+    assert max(auto_w, auto_h) > max(fixed_w, fixed_h), (
+        f"auto {auto_w:.1f}x{auto_h:.1f} should cover more than fixed {fixed_w:.1f}x{fixed_h:.1f}"
+    )
+
+
+def test_auto_rotate_default_true():
+    """image_bytes_to_polylines defaults auto_rotate to True."""
+    polylines = image_bytes_to_polylines(
+        _synthetic_image_bytes(),
+        paper_width_mm=215.9, paper_height_mm=279.4, margin_mm=40.0,
+        rotate=0, mirror=False, region=0, low=60, high=160,
+        merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
+    )
+    # For a square input, auto-rotate picks either orientation; just check it ran.
+    assert isinstance(polylines, list)
+    assert len(polylines) > 0

@@ -159,6 +159,10 @@ type generateArgs struct {
 	MarginMM      float64 `json:"margin_mm"`
 	Rotate        int     `json:"rotate"`
 	Mirror        bool    `json:"mirror"`
+	// AutoRotate, when nil, uses the Python default (true) that picks
+	// between 0° and 90° to maximize paper coverage. Set to false to
+	// use Rotate verbatim.
+	AutoRotate *bool `json:"auto_rotate,omitempty"`
 }
 
 func parseGenerateArgs(payload interface{}) (*generateArgs, error) {
@@ -210,6 +214,13 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 	}
 	if a.Mirror {
 		args = append(args, "--mirror")
+	}
+	if a.AutoRotate != nil {
+		if *a.AutoRotate {
+			args = append(args, "--auto-rotate")
+		} else {
+			args = append(args, "--no-auto-rotate")
+		}
 	}
 	return args
 }

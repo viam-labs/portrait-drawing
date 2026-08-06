@@ -9,9 +9,13 @@ with (0,0) at the paper's top-left corner and Y pointing down.
 Usage:
     cat photo.jpg | python image_to_polylines.py \\
         --paper-width-mm 215.9 --paper-height-mm 279.4 --margin-mm 40 \\
-        [--rotate 0|90|180|270] [--mirror] [--region 25] \\
-        [--low 60] [--high 160] [--merge 5] [--prune 25] \\
+        [--auto-rotate | --no-auto-rotate] [--rotate 0|90|180|270] [--mirror] \\
+        [--region 25] [--low 60] [--high 160] [--merge 5] [--prune 25] \\
         [--min-len 90] [--smooth 2.5] [--min-dist 8]
+
+With --auto-rotate (the default), rotation is chosen between 0 and 90 to
+maximize the paper coverage; --rotate is ignored. Pass --no-auto-rotate to
+use --rotate verbatim.
 
 Prints {"polylines": [[[x, y], ...], ...]} to stdout.
 """
@@ -135,6 +139,14 @@ def _rotate_ccw(pts: np.ndarray, degrees: int) -> np.ndarray:
     return np.stack([rx, ry], axis=1)
 
 
+def _fit_scale(pts: np.ndarray, paper_w: float, paper_h: float, margin: float) -> float:
+    """How large the drawing scales to fit inside the paper minus margin."""
+    origin = pts.min(axis=0)
+    draw_w, draw_h = pts.max(axis=0) - origin
+    avail_w, avail_h = paper_w - 2 * margin, paper_h - 2 * margin
+    return min(avail_w / max(draw_w, 1), avail_h / max(draw_h, 1))
+
+
 def polylines_to_mm(
     polylines: list[np.ndarray],
     paper_w: float,
@@ -142,14 +154,25 @@ def polylines_to_mm(
     margin: float,
     rotate: int,
     mirror: bool,
+    auto_rotate: bool = True,
 ) -> list[list[list[float]]]:
-    """Convert pixel-space polylines to paper-local mm, aspect preserved, centered."""
+    """Convert pixel-space polylines to paper-local mm, aspect preserved, centered.
+
+    When auto_rotate is True, chooses between 0° and 90° to maximize the paper
+    coverage factor; the caller-supplied `rotate` is ignored. Set auto_rotate=False
+    to use `rotate` verbatim.
+    """
     if not polylines:
         return []
 
-    all_pts = _rotate_ccw(
-        np.concatenate([p.reshape(-1, 2) for p in polylines]), rotate,
-    )
+    concatenated = np.concatenate([p.reshape(-1, 2) for p in polylines])
+
+    if auto_rotate:
+        scale_0 = _fit_scale(_rotate_ccw(concatenated, 0), paper_w, paper_h, margin)
+        scale_90 = _fit_scale(_rotate_ccw(concatenated, 90), paper_w, paper_h, margin)
+        rotate = 0 if scale_0 >= scale_90 else 90
+
+    all_pts = _rotate_ccw(concatenated, rotate)
     origin = all_pts.min(axis=0)
     draw_w, draw_h = all_pts.max(axis=0) - origin
 
@@ -186,6 +209,7 @@ def image_bytes_to_polylines(
     min_len: int,
     smooth: float,
     min_dist: float,
+    auto_rotate: bool = True,
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -197,7 +221,10 @@ def image_bytes_to_polylines(
         gray, region=region, low=low, high=high, merge=merge,
         prune=prune, min_len=min_len, smooth=smooth, min_dist=min_dist,
     )
-    return polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
+    return polylines_to_mm(
+        polylines, paper_width_mm, paper_height_mm, margin_mm,
+        rotate, mirror, auto_rotate=auto_rotate,
+    )
 
 
 def main() -> int:
@@ -206,6 +233,7 @@ def main() -> int:
     p.add_argument("--paper-height-mm", type=float, default=279.4)
     p.add_argument("--margin-mm", type=float, default=40.0)
     p.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
+    p.add_argument("--auto-rotate", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--mirror", action="store_true")
     p.add_argument("--region", type=int, default=25)
     p.add_argument("--low", type=int, default=60)
@@ -238,6 +266,7 @@ def main() -> int:
             min_len=args.min_len,
             smooth=args.smooth,
             min_dist=args.min_dist,
+            auto_rotate=args.auto_rotate,
         )
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
