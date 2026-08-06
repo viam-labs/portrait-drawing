@@ -225,6 +225,9 @@ type drawImageArgs struct {
 	MarginMM float64 `json:"margin_mm"`
 	Rotate   int     `json:"rotate"`
 	Mirror   bool    `json:"mirror"`
+	// AutoRotate, when nil, defaults to true — the generator picks between
+	// 0° and 90° to maximize paper coverage. Set to false to use Rotate.
+	AutoRotate *bool `json:"auto_rotate,omitempty"`
 }
 
 func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
@@ -258,16 +261,18 @@ func (d *drawer) drawImage(ctx context.Context, payload interface{}) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
-	genPayload := map[string]interface{}{
-		"generate": map[string]interface{}{
-			"image_b64":       a.ImageB64,
-			"paper_width_mm":  d.cfg.PaperWidthMM,
-			"paper_height_mm": d.cfg.PaperHeightMM,
-			"margin_mm":       a.MarginMM,
-			"rotate":          a.Rotate,
-			"mirror":          a.Mirror,
-		},
+	inner := map[string]interface{}{
+		"image_b64":       a.ImageB64,
+		"paper_width_mm":  d.cfg.PaperWidthMM,
+		"paper_height_mm": d.cfg.PaperHeightMM,
+		"margin_mm":       a.MarginMM,
+		"rotate":          a.Rotate,
+		"mirror":          a.Mirror,
 	}
+	if a.AutoRotate != nil {
+		inner["auto_rotate"] = *a.AutoRotate
+	}
+	genPayload := map[string]interface{}{"generate": inner}
 	resp, err := d.strokeGenerator.DoCommand(ctx, genPayload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: stroke_generator call: %w", err)
