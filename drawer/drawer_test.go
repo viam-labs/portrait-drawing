@@ -103,6 +103,19 @@ func TestConfigValidate_valid(t *testing.T) {
 	test.That(t, deps, test.ShouldResemble, []string{"my-arm"})
 }
 
+func TestConfigValidate_strokeGeneratorInDeps(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		StrokeGenerator:    "my-generator",
+	}
+	deps, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldResemble, []string{"my-arm", "my-generator"})
+}
+
 func TestParseDrawPayload_valid(t *testing.T) {
 	payload := map[string]interface{}{
 		"polylines": []interface{}{
@@ -163,6 +176,55 @@ func TestParseDrawPayload_nonNumeric(t *testing.T) {
 	}
 	_, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
+}
+
+func TestParseDrawImageArgs_valid(t *testing.T) {
+	payload := map[string]interface{}{
+		"image_b64": "abc",
+		"margin_mm": 20.0,
+		"rotate":    90,
+		"mirror":    true,
+	}
+	got, err := parseDrawImageArgs(payload)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.ImageB64, test.ShouldEqual, "abc")
+	test.That(t, got.MarginMM, test.ShouldEqual, 20.0)
+	test.That(t, got.Rotate, test.ShouldEqual, 90)
+	test.That(t, got.Mirror, test.ShouldBeTrue)
+}
+
+func TestParseDrawImageArgs_missingImage(t *testing.T) {
+	_, err := parseDrawImageArgs(map[string]interface{}{"margin_mm": 20.0})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "image_b64")
+}
+
+func TestParseDrawImageArgs_negativeMargin(t *testing.T) {
+	_, err := parseDrawImageArgs(map[string]interface{}{
+		"image_b64": "abc",
+		"margin_mm": -1.0,
+	})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "margin_mm")
+}
+
+func TestParseDrawImageArgs_badRotate(t *testing.T) {
+	_, err := parseDrawImageArgs(map[string]interface{}{
+		"image_b64": "abc",
+		"rotate":    45,
+	})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "rotate")
+}
+
+func TestDrawImage_missingGenerator(t *testing.T) {
+	d := &drawer{
+		logger: logging.NewTestLogger(t),
+		cfg:    &Config{},
+	}
+	_, err := d.drawImage(context.Background(), map[string]interface{}{"image_b64": "abc"})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "stroke_generator")
 }
 
 func TestBuildFrameSystemUsesService(t *testing.T) {
