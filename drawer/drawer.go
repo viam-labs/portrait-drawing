@@ -217,9 +217,31 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		return d.drawImage(ctx, cmd["draw_image"])
 	case "cancel":
 		return d.cancel(ctx)
+	case "go_home":
+		return d.goHome(ctx)
 	default:
-		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\", \"draw_image\", or \"cancel\"", v)
+		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"cancel\", or \"go_home\"", v)
 	}
+}
+
+func (d *drawer) goHome(parent context.Context) (map[string]interface{}, error) {
+	if d.homePose == nil {
+		return nil, errors.New("drawer: home_pose is not configured")
+	}
+	ctx, release, err := d.acquireDrawSlot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	fs, err := d.buildFrameSystem(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := d.planAndExecute(ctx, fs, d.homePose, nil); err != nil {
+		return nil, fmt.Errorf("drawer: go_home: %w", err)
+	}
+	return map[string]interface{}{"status": "ok"}, nil
 }
 
 // Only one draw/draw_image in flight at a time. Cancel aborts it and Stops the arm.
