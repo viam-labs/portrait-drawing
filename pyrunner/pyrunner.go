@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"time"
@@ -28,11 +29,18 @@ import (
 // lands, callers can invoke the compiled binary directly and skip this
 // wrapper.
 func Run(ctx context.Context, logger logging.Logger, pythonBin, scriptPath string, args ...string) ([]byte, error) {
+	return RunWithStdin(ctx, logger, nil, pythonBin, scriptPath, args...)
+}
+
+// RunWithStdin is like Run but feeds stdin to the Python process from the
+// given reader. Use for scripts that read image bytes or other blob input.
+func RunWithStdin(ctx context.Context, logger logging.Logger, stdin io.Reader, pythonBin, scriptPath string, args ...string) ([]byte, error) {
 	start := time.Now()
 	fullArgs := append([]string{scriptPath}, args...)
 	//nolint:gosec // pythonBin and scriptPath are internal, validated by caller.
 	cmd := exec.CommandContext(ctx, pythonBin, fullArgs...)
 	var stdout, stderr bytes.Buffer
+	cmd.Stdin = stdin
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
