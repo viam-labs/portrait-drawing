@@ -46,7 +46,11 @@ type Config struct {
 	LiftOffZMM         float64     `json:"lift_off_z_mm,omitempty"`
 	// HomePose, if set, is the tool pose the arm returns to after the last
 	// polyline is drawn.
-	HomePose           *poseConfig                                `json:"home_pose,omitempty"`
+	HomePose *poseConfig `json:"home_pose,omitempty"`
+	// StrokeGenerator, if set, is the name of a stroke-generator service
+	// the drawer calls from the draw_image verb to turn a photo into
+	// polylines in one DoCommand.
+	StrokeGenerator    string                                     `json:"stroke_generator,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 }
 
@@ -84,7 +88,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.HomePose != nil && cfg.HomePose.Orientation == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "home_pose.orientation")
 	}
-	return []string{cfg.Arm}, nil, nil
+	deps := []string{cfg.Arm}
+	if cfg.StrokeGenerator != "" {
+		deps = append(deps, cfg.StrokeGenerator)
+	}
+	return deps, nil, nil
 }
 
 type drawer struct {
@@ -98,6 +106,7 @@ type drawer struct {
 	fsService          framesystem.Service
 	paperTopLeftCorner spatialmath.Pose
 	homePose           spatialmath.Pose
+	strokeGenerator    resource.Resource
 }
 
 func newDrawer(
@@ -127,11 +136,18 @@ func newDrawer(
 	}
 	var homePose spatialmath.Pose
 	if cfg.HomePose != nil {
-		homeOrientation, err := cfg.HomePose.Orientation.ParseConfig()
-		if err != nil {
-			return nil, fmt.Errorf("drawer: parse home_pose.orientation: %w", err)
+		homeOrientation, homeErr := cfg.HomePose.Orientation.ParseConfig()
+		if homeErr != nil {
+			return nil, fmt.Errorf("drawer: parse home_pose.orientation: %w", homeErr)
 		}
 		homePose = spatialmath.NewPose(cfg.HomePose.Translation, homeOrientation)
+	}
+	var gen resource.Resource
+	if cfg.StrokeGenerator != "" {
+		gen, err = generic.FromProvider(deps, cfg.StrokeGenerator)
+		if err != nil {
+			return nil, fmt.Errorf("drawer: get stroke_generator dep %q: %w", cfg.StrokeGenerator, err)
+		}
 	}
 	return &drawer{
 		name:               conf.ResourceName(),
@@ -141,6 +157,7 @@ func newDrawer(
 		fsService:          fsService,
 		paperTopLeftCorner: spatialmath.NewPose(cfg.PaperTopLeftCorner.Translation, orientation),
 		homePose:           homePose,
+		strokeGenerator:    gen,
 	}, nil
 }
 
@@ -192,9 +209,70 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 	switch v {
 	case "draw":
 		return d.draw(ctx, cmd["draw"])
+	case "draw_image":
+		return d.drawImage(ctx, cmd["draw_image"])
 	default:
-		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\"", v)
+		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\" or \"draw_image\"", v)
 	}
+}
+
+// drawImageArgs is the DoCommand payload for the "draw_image" verb.
+// Paper geometry is not here — the drawer already knows paper_width_mm
+// and paper_height_mm from its own config and forwards them to the
+// stroke_generator.
+type drawImageArgs struct {
+	ImageB64 string  `json:"image_b64"`
+	MarginMM float64 `json:"margin_mm"`
+	Rotate   int     `json:"rotate"`
+	Mirror   bool    `json:"mirror"`
+}
+
+func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	var a drawImageArgs
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	if a.ImageB64 == "" {
+		return nil, errors.New("image_b64 is required")
+	}
+	if a.MarginMM < 0 {
+		return nil, fmt.Errorf("margin_mm must be >= 0, got %g", a.MarginMM)
+	}
+	switch a.Rotate {
+	case 0, 90, 180, 270:
+	default:
+		return nil, fmt.Errorf("rotate must be 0, 90, 180, or 270, got %d", a.Rotate)
+	}
+	return &a, nil
+}
+
+func (d *drawer) drawImage(ctx context.Context, payload interface{}) (map[string]interface{}, error) {
+	if d.strokeGenerator == nil {
+		return nil, errors.New("drawer: draw_image requires stroke_generator to be configured")
+	}
+	a, err := parseDrawImageArgs(payload)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	genPayload := map[string]interface{}{
+		"generate": map[string]interface{}{
+			"image_b64":       a.ImageB64,
+			"paper_width_mm":  d.cfg.PaperWidthMM,
+			"paper_height_mm": d.cfg.PaperHeightMM,
+			"margin_mm":       a.MarginMM,
+			"rotate":          a.Rotate,
+			"mirror":          a.Mirror,
+		},
+	}
+	resp, err := d.strokeGenerator.DoCommand(ctx, genPayload)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: stroke_generator call: %w", err)
+	}
+	return d.draw(ctx, resp)
 }
 
 func (d *drawer) draw(ctx context.Context, payload interface{}) (map[string]interface{}, error) {
