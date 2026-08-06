@@ -10,6 +10,12 @@
       "model": "viam:portrait-drawing:drawer",
       "short_description": "Draws polylines on paper via a robotic arm.",
       "markdown_link": "README.md"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "viam:portrait-drawing:stroke-generator",
+      "short_description": "Turns an image into ordered 2D polylines for the drawer.",
+      "markdown_link": "README.md"
     }
   ],
   "applications": null,
