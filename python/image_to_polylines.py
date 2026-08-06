@@ -13,9 +13,9 @@ Usage:
         [--region 25] [--low 60] [--high 160] [--merge 5] [--prune 25] \\
         [--min-len 90] [--smooth 2.5] [--min-dist 8]
 
-With --auto-rotate (the default), rotation is chosen between 0 and 90 to
-maximize the paper coverage; --rotate is ignored. Pass --no-auto-rotate to
-use --rotate verbatim.
+With --auto-rotate (the default), rotation is chosen (0 or 90) so the
+image's long side aligns with the paper's long side; --rotate is ignored.
+Pass --no-auto-rotate to use --rotate verbatim.
 
 Prints {"polylines": [[[x, y], ...], ...]} to stdout.
 """
@@ -139,12 +139,11 @@ def _rotate_ccw(pts: np.ndarray, degrees: int) -> np.ndarray:
     return np.stack([rx, ry], axis=1)
 
 
-def _fit_scale(pts: np.ndarray, paper_w: float, paper_h: float, margin: float) -> float:
-    """How large the drawing scales to fit inside the paper minus margin."""
-    origin = pts.min(axis=0)
-    draw_w, draw_h = pts.max(axis=0) - origin
-    avail_w, avail_h = paper_w - 2 * margin, paper_h - 2 * margin
-    return min(avail_w / max(draw_w, 1), avail_h / max(draw_h, 1))
+def _rotation_for_paper(img_w: int, img_h: int, paper_w: float, paper_h: float) -> int:
+    """Return 0 or 90 so the image's long side aligns with the paper's long side."""
+    img_landscape = img_w > img_h
+    paper_landscape = paper_w > paper_h
+    return 90 if img_landscape != paper_landscape else 0
 
 
 def polylines_to_mm(
@@ -154,25 +153,14 @@ def polylines_to_mm(
     margin: float,
     rotate: int,
     mirror: bool,
-    auto_rotate: bool = True,
 ) -> list[list[list[float]]]:
-    """Convert pixel-space polylines to paper-local mm, aspect preserved, centered.
-
-    When auto_rotate is True, chooses between 0° and 90° to maximize the paper
-    coverage factor; the caller-supplied `rotate` is ignored. Set auto_rotate=False
-    to use `rotate` verbatim.
-    """
+    """Convert pixel-space polylines to paper-local mm, aspect preserved, centered."""
     if not polylines:
         return []
 
-    concatenated = np.concatenate([p.reshape(-1, 2) for p in polylines])
-
-    if auto_rotate:
-        scale_0 = _fit_scale(_rotate_ccw(concatenated, 0), paper_w, paper_h, margin)
-        scale_90 = _fit_scale(_rotate_ccw(concatenated, 90), paper_w, paper_h, margin)
-        rotate = 0 if scale_0 >= scale_90 else 90
-
-    all_pts = _rotate_ccw(concatenated, rotate)
+    all_pts = _rotate_ccw(
+        np.concatenate([p.reshape(-1, 2) for p in polylines]), rotate,
+    )
     origin = all_pts.min(axis=0)
     draw_w, draw_h = all_pts.max(axis=0) - origin
 
@@ -217,13 +205,15 @@ def image_bytes_to_polylines(
     if img is None:
         raise ValueError("could not decode image bytes")
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if auto_rotate:
+        img_h, img_w = gray.shape
+        rotate = _rotation_for_paper(img_w, img_h, paper_width_mm, paper_height_mm)
     polylines = extract_polylines(
         gray, region=region, low=low, high=high, merge=merge,
         prune=prune, min_len=min_len, smooth=smooth, min_dist=min_dist,
     )
     return polylines_to_mm(
-        polylines, paper_width_mm, paper_height_mm, margin_mm,
-        rotate, mirror, auto_rotate=auto_rotate,
+        polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror,
     )
 
 
