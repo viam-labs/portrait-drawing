@@ -227,6 +227,13 @@ func TestDrawImage_missingGenerator(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "stroke_generator")
 }
 
+func TestGoHome_missingHomePose(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t)}
+	_, err := d.goHome(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "home_pose")
+}
+
 func TestCancel_nothingRunning(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t)}
 	resp, err := d.cancel(context.Background())
