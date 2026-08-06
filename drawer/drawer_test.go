@@ -227,6 +227,33 @@ func TestDrawImage_missingGenerator(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "stroke_generator")
 }
 
+func TestCancel_nothingRunning(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t)}
+	resp, err := d.cancel(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["canceled"], test.ShouldEqual, false)
+}
+
+func TestAcquireDrawSlot_blocksSecondCaller(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t)}
+	_, release, err := d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	defer release()
+	_, _, err = d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "already running")
+}
+
+func TestAcquireDrawSlot_releaseAllowsReacquire(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t)}
+	_, release, err := d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	release()
+	_, release2, err := d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	release2()
+}
+
 func TestBuildFrameSystemUsesService(t *testing.T) {
 	fsSvc := inject.NewFrameSystemService("test")
 	fsSvc.FrameSystemConfigFunc = func(_ context.Context) (*framesystem.Config, error) {
