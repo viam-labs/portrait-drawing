@@ -3,6 +3,7 @@ import numpy as np
 
 from image_to_polylines import (
     _rotate_ccw,
+    _rotation_for_paper,
     image_bytes_to_polylines,
     polylines_to_mm,
 )
@@ -62,6 +63,25 @@ def test_polylines_to_mm_empty():
     assert polylines_to_mm([], 100, 100, 10, 0, False) == []
 
 
+def test_rotation_for_paper_matching_orientations():
+    # Portrait image on portrait paper → no rotation
+    assert _rotation_for_paper(300, 400, 215.9, 279.4) == 0
+    # Landscape image on landscape paper → no rotation
+    assert _rotation_for_paper(400, 300, 279.4, 215.9) == 0
+
+
+def test_rotation_for_paper_mismatched_orientations():
+    # Landscape image on portrait paper → rotate 90°
+    assert _rotation_for_paper(400, 300, 215.9, 279.4) == 90
+    # Portrait image on landscape paper → rotate 90°
+    assert _rotation_for_paper(300, 400, 279.4, 215.9) == 90
+
+
+def test_rotation_for_paper_square_image_no_rotate():
+    # Square image (aspect == 1) is treated as portrait; stays 0° on portrait paper
+    assert _rotation_for_paper(300, 300, 215.9, 279.4) == 0
+
+
 def test_rotate_ccw_90():
     pts = np.array([[1, 0], [0, 1]])
     got = _rotate_ccw(pts, 90)
@@ -77,26 +97,6 @@ def test_rotate_ccw_invalid():
         raise AssertionError("expected ValueError for non-90-multiple rotation")
 
 
-def test_auto_rotate_picks_better_orientation():
-    """Landscape polyline on portrait paper should auto-rotate to 90°."""
-    # Wide landscape polyline: 200 wide x 20 tall (in pixel space)
-    landscape = [np.array([[10, 100], [210, 100], [210, 120], [10, 120]], np.int32).reshape(-1, 1, 2)]
-    # Portrait paper: 100 wide x 200 tall
-    auto = polylines_to_mm(landscape, 100, 200, 5, 0, False, auto_rotate=True)
-    fixed = polylines_to_mm(landscape, 100, 200, 5, 0, False, auto_rotate=False)
-    # After auto-rotate (90°), landscape drawing fits vertically → uses more paper.
-    # Widest span of auto output should be larger than fixed (portrait fit).
-    def span(pl):
-        xs = [x for line in pl for x, _ in line]
-        ys = [y for line in pl for _, y in line]
-        return max(xs) - min(xs), max(ys) - min(ys)
-    auto_w, auto_h = span(auto)
-    fixed_w, fixed_h = span(fixed)
-    assert max(auto_w, auto_h) > max(fixed_w, fixed_h), (
-        f"auto {auto_w:.1f}x{auto_h:.1f} should cover more than fixed {fixed_w:.1f}x{fixed_h:.1f}"
-    )
-
-
 def test_auto_rotate_default_true():
     """image_bytes_to_polylines defaults auto_rotate to True."""
     polylines = image_bytes_to_polylines(
@@ -105,6 +105,6 @@ def test_auto_rotate_default_true():
         rotate=0, mirror=False, region=0, low=60, high=160,
         merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
     )
-    # For a square input, auto-rotate picks either orientation; just check it ran.
+    # For a square input, auto-rotate picks 0° (no rotation); just check it ran.
     assert isinstance(polylines, list)
     assert len(polylines) > 0
