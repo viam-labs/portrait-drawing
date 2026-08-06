@@ -40,10 +40,10 @@ type Config struct {
 	// PaperTopLeftCorner is the tool pose the arm holds when the pen tip
 	// touches the paper's top-left corner. Orientation is reused for every
 	// waypoint so the pen keeps the same attitude across the whole drawing.
-	PaperTopLeftCorner *poseConfig                                `json:"paper_top_left_corner"`
-	PaperWidthMM  float64 `json:"paper_width_mm"`
-	PaperHeightMM float64 `json:"paper_height_mm"`
-	LiftOffZMM    float64 `json:"lift_off_z_mm,omitempty"`
+	PaperTopLeftCorner *poseConfig `json:"paper_top_left_corner"`
+	PaperWidthMM       float64     `json:"paper_width_mm"`
+	PaperHeightMM      float64     `json:"paper_height_mm"`
+	LiftOffZMM         float64     `json:"lift_off_z_mm,omitempty"`
 	// HomePose, if set, is the tool pose the arm returns to after the last
 	// polyline is drawn.
 	HomePose           *poseConfig                                `json:"home_pose,omitempty"`
