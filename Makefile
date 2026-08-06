@@ -1,15 +1,18 @@
 BINARY := portrait-drawing
 BIN_DIR := bin
 
-.PHONY: setup system-deps build lint check-lint test module.tar.gz clean
+.PHONY: setup system-deps venv build lint check-lint test python-test module.tar.gz clean
 
 default: module.tar.gz
 
-setup: system-deps
+setup: system-deps venv
 	go mod tidy
 
 system-deps:
 	bash ./setup.sh
+
+venv:
+	bash ./setup_python.sh
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -24,9 +27,13 @@ check-lint:
 
 test:
 	go test ./...
+	$(MAKE) python-test
+
+python-test:
+	.venv/bin/pytest python/ -v
 
 module.tar.gz: build
-	tar czf module.tar.gz $(BIN_DIR)/$(BINARY) meta.json first_run.sh setup.sh
+	tar czf module.tar.gz $(BIN_DIR)/$(BINARY) meta.json first_run.sh setup.sh setup_python.sh python requirements.txt
 	@echo "Created module.tar.gz"
 
 clean:

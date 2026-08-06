@@ -1,6 +1,13 @@
 .DS_Store
 *.swp
 
+# python virtual environments
+venv
+.venv
+.env
+__pycache__/
+*.py[cod]
+
 # go build output
 bin
 *.exe
