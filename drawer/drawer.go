@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync"
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
@@ -107,6 +108,9 @@ type drawer struct {
 	paperTopLeftCorner spatialmath.Pose
 	homePose           spatialmath.Pose
 	strokeGenerator    resource.Resource
+
+	mu       sync.Mutex
+	cancelFn context.CancelFunc
 }
 
 func newDrawer(
@@ -211,9 +215,43 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		return d.draw(ctx, cmd["draw"])
 	case "draw_image":
 		return d.drawImage(ctx, cmd["draw_image"])
+	case "cancel":
+		return d.cancel(ctx)
 	default:
-		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\" or \"draw_image\"", v)
+		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\", \"draw_image\", or \"cancel\"", v)
 	}
+}
+
+// Only one draw/draw_image in flight at a time. Cancel aborts it and Stops the arm.
+func (d *drawer) acquireDrawSlot(parent context.Context) (context.Context, func(), error) {
+	d.mu.Lock()
+	if d.cancelFn != nil {
+		d.mu.Unlock()
+		return nil, nil, errors.New("drawer: another draw is already running; call cancel first")
+	}
+	ctx, cancel := context.WithCancel(parent)
+	d.cancelFn = cancel
+	d.mu.Unlock()
+	return ctx, func() {
+		d.mu.Lock()
+		d.cancelFn = nil
+		d.mu.Unlock()
+		cancel()
+	}, nil
+}
+
+func (d *drawer) cancel(ctx context.Context) (map[string]interface{}, error) {
+	d.mu.Lock()
+	cancelFn := d.cancelFn
+	d.mu.Unlock()
+	if cancelFn == nil {
+		return map[string]interface{}{"canceled": false, "reason": "nothing running"}, nil
+	}
+	cancelFn()
+	if err := d.arm.Stop(ctx, nil); err != nil {
+		d.logger.Warnf("drawer: arm.Stop during cancel: %v", err)
+	}
+	return map[string]interface{}{"canceled": true}, nil
 }
 
 // drawImageArgs is the DoCommand payload for the "draw_image" verb.
@@ -253,7 +291,7 @@ func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
 	return &a, nil
 }
 
-func (d *drawer) drawImage(ctx context.Context, payload interface{}) (map[string]interface{}, error) {
+func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[string]interface{}, error) {
 	if d.strokeGenerator == nil {
 		return nil, errors.New("drawer: draw_image requires stroke_generator to be configured")
 	}
@@ -261,6 +299,12 @@ func (d *drawer) drawImage(ctx context.Context, payload interface{}) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
+	ctx, release, err := d.acquireDrawSlot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	inner := map[string]interface{}{
 		"image_b64":       a.ImageB64,
 		"paper_width_mm":  d.cfg.PaperWidthMM,
@@ -272,20 +316,31 @@ func (d *drawer) drawImage(ctx context.Context, payload interface{}) (map[string
 	if a.AutoRotate != nil {
 		inner["auto_rotate"] = *a.AutoRotate
 	}
-	genPayload := map[string]interface{}{"generate": inner}
-	resp, err := d.strokeGenerator.DoCommand(ctx, genPayload)
+	resp, err := d.strokeGenerator.DoCommand(ctx, map[string]interface{}{"generate": inner})
 	if err != nil {
 		return nil, fmt.Errorf("drawer: stroke_generator call: %w", err)
 	}
-	return d.draw(ctx, resp)
+	polylines, err := parseDrawPayload(resp)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	return d.executeDraw(ctx, polylines)
 }
 
-func (d *drawer) draw(ctx context.Context, payload interface{}) (map[string]interface{}, error) {
+func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
 	polylines, err := parseDrawPayload(payload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
+	ctx, release, err := d.acquireDrawSlot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return d.executeDraw(ctx, polylines)
+}
 
+func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[string]interface{}, error) {
 	fs, err := d.buildFrameSystem(ctx)
 	if err != nil {
 		return nil, err
@@ -296,8 +351,6 @@ func (d *drawer) draw(ctx context.Context, payload interface{}) (map[string]inte
 	zDown := corner.Z
 	zUp := corner.Z + d.cfg.LiftOffZMM
 
-	// LinearConstraint enforces both a straight Cartesian path and orientation
-	// lock along every planned move.
 	constraints := motionplan.NewConstraints(
 		[]motionplan.LinearConstraint{{
 			LineToleranceMm:          drawLineToleranceMM,
