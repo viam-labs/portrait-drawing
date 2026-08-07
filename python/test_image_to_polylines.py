@@ -4,6 +4,8 @@ import numpy as np
 from image_to_polylines import (
     _rotate_ccw,
     _rotation_for_paper,
+    analyze_image,
+    auto_canny_thresholds,
     image_bytes_to_polylines,
     polylines_to_mm,
 )
@@ -108,3 +110,51 @@ def test_auto_rotate_default_true():
     # For a square input, auto-rotate picks 0° (no rotation); just check it ran.
     assert isinstance(polylines, list)
     assert len(polylines) > 0
+
+
+def test_pipeline_with_isolate_subject_off():
+    """Background removal can be disabled; pipeline still returns polylines."""
+    polylines = image_bytes_to_polylines(
+        _synthetic_image_bytes(),
+        paper_width_mm=215.9, paper_height_mm=279.4, margin_mm=40.0,
+        rotate=0, mirror=False, region=0, low=60, high=160,
+        merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
+        isolate_subject=False, face_detail=0.0,
+    )
+    assert isinstance(polylines, list)
+    assert len(polylines) > 0
+
+
+def test_pipeline_with_adaptive_detail():
+    """detail > 0 auto-tunes thresholds (ignores low/high); pipeline runs."""
+    polylines = image_bytes_to_polylines(
+        _synthetic_image_bytes(),
+        paper_width_mm=215.9, paper_height_mm=279.4, margin_mm=40.0,
+        rotate=0, mirror=False, region=0, low=60, high=160,
+        merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
+        detail=2.0, isolate_subject=False, face_detail=0.0,
+    )
+    assert isinstance(polylines, list)
+    assert len(polylines) > 0
+
+
+def test_analyze_image_returns_gray_roi_face():
+    """analyze_image returns a 2D gray plus (roi, face) that are None or masks."""
+    img = cv2.imdecode(
+        np.frombuffer(_synthetic_image_bytes(), np.uint8), cv2.IMREAD_COLOR,
+    )
+    gray, roi, face = analyze_image(
+        img, isolate_subject=False, face_detail=0.0, face_size_px=520,
+    )
+    assert gray.ndim == 2
+    assert roi is None          # background not removed
+    assert face is None         # face_detail off (and no face in a square)
+
+
+def test_auto_canny_thresholds_ordered():
+    """Returns low <= high, both in a sane 0..300 range."""
+    filtered = cv2.imdecode(
+        np.frombuffer(_synthetic_image_bytes(), np.uint8), cv2.IMREAD_GRAYSCALE,
+    )
+    low, high = auto_canny_thresholds(filtered, target_frac=0.02)
+    assert 0 <= low <= high <= 300

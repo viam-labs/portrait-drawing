@@ -21,6 +21,29 @@ func TestConfigValidate_negativeSmooth(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "smooth")
 }
 
+func ptr[T any](v T) *T { return &v }
+
+func TestConfigValidate_negativeDetail(t *testing.T) {
+	cfg := &Config{Detail: ptr(-1.0)}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "detail")
+}
+
+func TestConfigValidate_negativeFaceDetail(t *testing.T) {
+	cfg := &Config{FaceDetail: ptr(-1.0)}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "face_detail")
+}
+
+func TestConfigValidate_zeroDetailAllowed(t *testing.T) {
+	// 0 is a meaningful value (use fixed low/high) and must pass validation.
+	cfg := &Config{Detail: ptr(0.0), FaceDetail: ptr(0.0)}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+}
+
 func TestConfigValidate_lowOutOfRange(t *testing.T) {
 	cfg := &Config{Low: 300}
 	_, _, err := cfg.Validate("")
@@ -109,7 +132,19 @@ func TestParseGenerateArgs_negativeMargin(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "margin_mm")
 }
 
-func TestBuildCLIArgs_defaults(t *testing.T) {
+// argValue returns the value following flag in an --flag value arg slice.
+func argValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func TestBuildCLIArgs_omitsUnsetFaceKnobs(t *testing.T) {
+	// Unset (nil) face-aware knobs must NOT be passed, so the Python pipeline
+	// applies its own defaults (the single source of truth for tuned values).
 	s := &strokeGenerator{cfg: &Config{
 		Region: defaultRegion, Low: defaultLow, High: defaultHigh,
 		Merge: defaultMerge, Prune: defaultPrune, MinLen: defaultMinLen,
@@ -118,13 +153,28 @@ func TestBuildCLIArgs_defaults(t *testing.T) {
 	args := s.buildCLIArgs(&generateArgs{
 		PaperWidthMM: 215.9, PaperHeightMM: 279.4, MarginMM: 40.0, Rotate: 0, Mirror: false,
 	})
-	test.That(t, args, test.ShouldContain, "--paper-width-mm")
-	test.That(t, args, test.ShouldContain, "215.9")
-	test.That(t, args, test.ShouldContain, "--rotate")
-	test.That(t, args, test.ShouldContain, "0")
-	test.That(t, args, test.ShouldContain, "--region")
-	test.That(t, args, test.ShouldContain, "25")
+	test.That(t, argValue(args, "--paper-width-mm"), test.ShouldEqual, "215.9")
+	test.That(t, argValue(args, "--region"), test.ShouldEqual, "10")
+	test.That(t, args, test.ShouldNotContain, "--detail")
+	test.That(t, args, test.ShouldNotContain, "--face-detail")
+	test.That(t, args, test.ShouldNotContain, "--face-size-px")
+	test.That(t, args, test.ShouldNotContain, "--isolate-subject")
+	test.That(t, args, test.ShouldNotContain, "--no-isolate-subject")
 	test.That(t, args, test.ShouldNotContain, "--mirror")
+}
+
+func TestBuildCLIArgs_passesSetFaceKnobs(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{
+		Detail: ptr(2.0), FaceDetail: ptr(0.0), FaceSizePx: ptr(400),
+		IsolateSubject: ptr(true),
+	}}
+	args := s.buildCLIArgs(&generateArgs{
+		PaperWidthMM: 100, PaperHeightMM: 100, MarginMM: 10, Rotate: 0, Mirror: false,
+	})
+	test.That(t, argValue(args, "--detail"), test.ShouldEqual, "2")
+	test.That(t, argValue(args, "--face-detail"), test.ShouldEqual, "0")
+	test.That(t, argValue(args, "--face-size-px"), test.ShouldEqual, "400")
+	test.That(t, args, test.ShouldContain, "--isolate-subject")
 }
 
 func TestBuildCLIArgs_mirrorAppended(t *testing.T) {
@@ -133,4 +183,14 @@ func TestBuildCLIArgs_mirrorAppended(t *testing.T) {
 		PaperWidthMM: 100, PaperHeightMM: 100, MarginMM: 10, Rotate: 90, Mirror: true,
 	})
 	test.That(t, args, test.ShouldContain, "--mirror")
+}
+
+func TestBuildCLIArgs_isolateSubjectDisabled(t *testing.T) {
+	disabled := false
+	s := &strokeGenerator{cfg: &Config{IsolateSubject: &disabled}}
+	args := s.buildCLIArgs(&generateArgs{
+		PaperWidthMM: 100, PaperHeightMM: 100, MarginMM: 10, Rotate: 0, Mirror: false,
+	})
+	test.That(t, args, test.ShouldContain, "--no-isolate-subject")
+	test.That(t, args, test.ShouldNotContain, "--isolate-subject")
 }
