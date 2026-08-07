@@ -15,6 +15,9 @@ bin
 # packaged module
 module.tar.gz
 
+# model assets (fetched at install by first_run.sh)
+*.onnx
+
 # tmp
 tmp
 

@@ -35,6 +35,14 @@ func init() {
 // image-processing pipeline; per-call paper geometry lives in the
 // generate DoCommand payload.
 type Config struct {
+	// Face-aware knobs are pointers so nil omits the flag and the Python
+	// pipeline's own default applies (the source of truth for the tuned
+	// values); an explicit 0 is honoured. IsolateSubject nil means true.
+	Detail         *float64 `json:"detail,omitempty"`
+	FaceDetail     *float64 `json:"face_detail,omitempty"`
+	FaceSizePx     *int     `json:"face_size_px,omitempty"`
+	IsolateSubject *bool    `json:"isolate_subject,omitempty"`
+
 	Region  int     `json:"region,omitempty"`
 	Low     int     `json:"low,omitempty"`
 	High    int     `json:"high,omitempty"`
@@ -46,19 +54,28 @@ type Config struct {
 }
 
 const (
-	defaultRegion  = 25
-	defaultLow     = 60
-	defaultHigh    = 160
-	defaultMerge   = 5
+	defaultRegion  = 10
+	defaultLow     = 50
+	defaultHigh    = 120
+	defaultMerge   = 3
 	defaultPrune   = 25
-	defaultMinLen  = 90
+	defaultMinLen  = 40
 	defaultSmooth  = 2.5
-	defaultMinDist = 8.0
+	defaultMinDist = 5.0
 	defaultMargin  = 40.0
 )
 
 // Validate returns implicit dependencies and any config errors.
 func (cfg *Config) Validate(_ string) ([]string, []string, error) {
+	if cfg.Detail != nil && *cfg.Detail < 0 {
+		return nil, nil, fmt.Errorf("detail must be >= 0, got %g", *cfg.Detail)
+	}
+	if cfg.FaceDetail != nil && *cfg.FaceDetail < 0 {
+		return nil, nil, fmt.Errorf("face_detail must be >= 0, got %g", *cfg.FaceDetail)
+	}
+	if cfg.FaceSizePx != nil && *cfg.FaceSizePx < 0 {
+		return nil, nil, fmt.Errorf("face_size_px must be >= 0, got %d", *cfg.FaceSizePx)
+	}
 	if cfg.Region < 0 {
 		return nil, nil, fmt.Errorf("region must be >= 0, got %d", cfg.Region)
 	}
@@ -107,6 +124,7 @@ func newStrokeGenerator(
 	if err != nil {
 		return nil, err
 	}
+	// Pointer knobs are left nil-as-is (omitted -> Python default).
 	if cfg.Region == 0 {
 		cfg.Region = defaultRegion
 	}
@@ -211,6 +229,23 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 		"--min-len", strconv.Itoa(s.cfg.MinLen),
 		"--smooth", strconv.FormatFloat(s.cfg.Smooth, 'f', -1, 64),
 		"--min-dist", strconv.FormatFloat(s.cfg.MinDist, 'f', -1, 64),
+	}
+	// Face-aware knobs: pass only when set (see Config).
+	if s.cfg.Detail != nil {
+		args = append(args, "--detail", strconv.FormatFloat(*s.cfg.Detail, 'f', -1, 64))
+	}
+	if s.cfg.FaceDetail != nil {
+		args = append(args, "--face-detail", strconv.FormatFloat(*s.cfg.FaceDetail, 'f', -1, 64))
+	}
+	if s.cfg.FaceSizePx != nil {
+		args = append(args, "--face-size-px", strconv.Itoa(*s.cfg.FaceSizePx))
+	}
+	if s.cfg.IsolateSubject != nil {
+		if *s.cfg.IsolateSubject {
+			args = append(args, "--isolate-subject")
+		} else {
+			args = append(args, "--no-isolate-subject")
+		}
 	}
 	if a.Mirror {
 		args = append(args, "--mirror")
