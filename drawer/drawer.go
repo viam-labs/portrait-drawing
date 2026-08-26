@@ -53,6 +53,11 @@ type Config struct {
 	// HomePose, if set, is the tool pose the arm rests at between drawings.
 	// CapturePose takes precedence over it when both are set.
 	HomePose *poseConfig `json:"home_pose,omitempty"`
+	// AllowedCollisions lists frame pairs the planner should not treat as a
+	// collision. Anything bolted to the arm — a wrist camera, a pen holder —
+	// overlaps the link it is mounted on in every configuration, which the
+	// planner cannot distinguish from a real collision.
+	AllowedCollisions []AllowedCollision `json:"allowed_collisions,omitempty"`
 	// CapturePose, if set, names an arm-position-saver switch holding the
 	// pose the arm rests at — the one its camera frames the subject from.
 	// Preferred over HomePose: the pose is taught by jogging the arm rather
@@ -71,6 +76,13 @@ type Config struct {
 	// instead of coming back as base64.
 	PreviewCamera      string                                     `json:"preview_camera,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
+}
+
+// AllowedCollision is a pair of frame names permitted to overlap. Use the names
+// exactly as the planner prints them, e.g. "arm-1:wrist_link" and "camera-1_origin".
+type AllowedCollision struct {
+	Frame1 string `json:"frame1"`
+	Frame2 string `json:"frame2"`
 }
 
 type poseConfig struct {
@@ -119,6 +131,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.CapturePose != "" && cfg.HomePose != nil {
 		return nil, nil, errors.New("capture_pose and home_pose are both set; capture_pose supersedes home_pose, so set only one")
 	}
+	for i, pair := range cfg.AllowedCollisions {
+		if pair.Frame1 == "" || pair.Frame2 == "" {
+			return nil, nil, fmt.Errorf("allowed_collisions[%d] needs both frame1 and frame2", i)
+		}
+	}
 	if cfg.Photo != "" && cfg.StrokeGenerator == "" {
 		return nil, nil, errors.New("photo is set but stroke_generator is not; capture_and_draw needs both")
 	}
@@ -153,6 +170,7 @@ type drawer struct {
 	photo              camera.Camera
 	previewCamera      camera.Camera
 	capturePose        toggleswitch.Switch
+	collisionSpecs     []motionplan.CollisionSpecification
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -230,6 +248,7 @@ func newDrawer(
 		photo:              photo,
 		previewCamera:      previewCamera,
 		capturePose:        capturePose,
+		collisionSpecs:     collisionSpecs(cfg.AllowedCollisions),
 	}, nil
 }
 
@@ -324,7 +343,7 @@ func (d *drawer) goToRestPose(ctx context.Context, fs *referenceframe.FrameSyste
 		}
 		fs = built
 	}
-	return d.planAndExecute(ctx, fs, d.homePose, nil)
+	return d.planAndExecute(ctx, fs, d.homePose, d.constraints(false))
 }
 
 func (d *drawer) capturePoseGoToPosition(ctx context.Context) (uint32, error) {
@@ -610,6 +629,37 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 	return d.executeDraw(ctx, polylines)
 }
 
+// constraints builds the planner constraints for one move: the configured
+// collision allowances always, and a straight-line requirement only when the pen
+// is on the paper.
+func (d *drawer) constraints(linear bool) *motionplan.Constraints {
+	var linConstraints []motionplan.LinearConstraint
+	if linear {
+		linConstraints = []motionplan.LinearConstraint{{
+			LineToleranceMm:          drawLineToleranceMM,
+			OrientationToleranceDegs: drawOrientationToleranceDegrees,
+		}}
+	}
+	if linConstraints == nil && d.collisionSpecs == nil {
+		return nil
+	}
+	return motionplan.NewConstraints(linConstraints, nil, nil, d.collisionSpecs)
+}
+
+func collisionSpecs(pairs []AllowedCollision) []motionplan.CollisionSpecification {
+	if len(pairs) == 0 {
+		return nil
+	}
+	allows := make([]motionplan.CollisionSpecificationAllowedFrameCollisions, 0, len(pairs))
+	for _, pair := range pairs {
+		allows = append(allows, motionplan.CollisionSpecificationAllowedFrameCollisions{
+			Frame1: pair.Frame1,
+			Frame2: pair.Frame2,
+		})
+	}
+	return []motionplan.CollisionSpecification{{Allows: allows}}
+}
+
 // waypoint is one planned move in a drawing. linear marks the moves where the
 // pen is on the paper (or dropping onto it), which must follow a straight line;
 // the rest are travel and are left to the planner.
@@ -652,14 +702,6 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 	zDown := corner.Z
 	zUp := corner.Z + d.cfg.LiftOffZMM
 
-	constraints := motionplan.NewConstraints(
-		[]motionplan.LinearConstraint{{
-			LineToleranceMm:          drawLineToleranceMM,
-			OrientationToleranceDegs: drawOrientationToleranceDegrees,
-		}},
-		nil, nil, nil,
-	)
-
 	total := 0
 	for _, poly := range polylines {
 		total += len(poly)
@@ -672,12 +714,8 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
-		var c *motionplan.Constraints
-		if wp.linear {
-			c = constraints
-		}
 		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
-		if err := d.planAndExecute(ctx, fs, target, c); err != nil {
+		if err := d.planAndExecute(ctx, fs, target, d.constraints(wp.linear)); err != nil {
 			return nil, fmt.Errorf("drawer: %s: %w", wp.label, err)
 		}
 		if !wp.endsPolyline {
