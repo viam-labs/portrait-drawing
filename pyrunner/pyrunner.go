@@ -45,7 +45,7 @@ func RunWithStdin(ctx context.Context, logger logging.Logger, stdin io.Reader, p
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	duration := time.Since(start)
-	logger.Debugf("pyrunner: %s completed in %s", filepath.Base(scriptPath), duration)
+	logger.Infof("pyrunner: %s completed in %s", filepath.Base(scriptPath), duration)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s failed after %s: %w\nstderr: %s", pythonBin, scriptPath, duration, err, stderr.String())
 	}

@@ -532,3 +532,16 @@ func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
 	test.That(t, last.y, test.ShouldEqual, 20.0)
 	test.That(t, last.z, test.ShouldEqual, 5.0)
 }
+
+func TestDrawWaypoints_onlyPenUpEndsAPolyline(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}}}, r3.Vector{}, 5, 0)
+	var ends int
+	for _, wp := range wps {
+		if wp.endsPolyline {
+			ends++
+			test.That(t, wp.label, test.ShouldContainSubstring, "pen-up")
+			test.That(t, wp.z, test.ShouldEqual, 5.0)
+		}
+	}
+	test.That(t, ends, test.ShouldEqual, 2)
+}

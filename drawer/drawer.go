@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
@@ -87,6 +88,9 @@ const (
 	capturePoseGoToLabel            = "go to"
 	drawLineToleranceMM             = 0.5
 	drawOrientationToleranceDegrees = 1.0
+	// progressStepPercent throttles progress logging by fraction of the
+	// drawing done, so the line count does not scale with stroke count.
+	progressStepPercent = 25
 )
 
 // Validate returns implicit dependencies and any config errors.
@@ -610,9 +614,10 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 // pen is on the paper (or dropping onto it), which must follow a straight line;
 // the rest are travel and are left to the planner.
 type waypoint struct {
-	x, y, z float64
-	linear  bool
-	label   string
+	x, y, z      float64
+	linear       bool
+	endsPolyline bool
+	label        string
 }
 
 func drawWaypoints(polylines []Polyline, corner r3.Vector, zUp, zDown float64) []waypoint {
@@ -620,15 +625,18 @@ func drawWaypoints(polylines []Polyline, corner r3.Vector, zUp, zDown float64) [
 	for i, poly := range polylines {
 		sx, sy := corner.X+poly[0][0], corner.Y+poly[0][1]
 		out = append(out,
-			waypoint{sx, sy, zUp, false, fmt.Sprintf("polyline %d approach", i)},
-			waypoint{sx, sy, zDown, true, fmt.Sprintf("polyline %d pen-down", i)},
+			waypoint{x: sx, y: sy, z: zUp, label: fmt.Sprintf("polyline %d approach", i)},
+			waypoint{x: sx, y: sy, z: zDown, linear: true, label: fmt.Sprintf("polyline %d pen-down", i)},
 		)
 		for j := 1; j < len(poly); j++ {
 			px, py := corner.X+poly[j][0], corner.Y+poly[j][1]
-			out = append(out, waypoint{px, py, zDown, true, fmt.Sprintf("polyline %d point %d", i, j)})
+			out = append(out, waypoint{x: px, y: py, z: zDown, linear: true, label: fmt.Sprintf("polyline %d point %d", i, j)})
 		}
 		lx, ly := corner.X+poly[len(poly)-1][0], corner.Y+poly[len(poly)-1][1]
-		out = append(out, waypoint{lx, ly, zUp, true, fmt.Sprintf("polyline %d pen-up", i)})
+		out = append(out, waypoint{
+			x: lx, y: ly, z: zUp, linear: true, endsPolyline: true,
+			label: fmt.Sprintf("polyline %d pen-up", i),
+		})
 	}
 	return out
 }
@@ -653,6 +661,13 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 	)
 
 	total := 0
+	for _, poly := range polylines {
+		total += len(poly)
+	}
+	d.logger.Infof("drawer: drawing %d polylines, %d points", len(polylines), total)
+	startedAt := time.Now()
+	drawn, nextProgress := 0, progressStepPercent
+
 	for _, wp := range drawWaypoints(polylines, corner, zUp, zDown) {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
@@ -665,10 +680,20 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		if err := d.planAndExecute(ctx, fs, target, c); err != nil {
 			return nil, fmt.Errorf("drawer: %s: %w", wp.label, err)
 		}
+		if !wp.endsPolyline {
+			continue
+		}
+		drawn++
+		// 100% is left to the "finished" line below.
+		if percent := drawn * 100 / len(polylines); percent >= nextProgress && percent < 100 {
+			d.logger.Infof("drawer: %d%% — %d/%d polylines, %s elapsed",
+				percent, drawn, len(polylines), time.Since(startedAt).Round(time.Second))
+			for nextProgress <= percent {
+				nextProgress += progressStepPercent
+			}
+		}
 	}
-	for _, poly := range polylines {
-		total += len(poly)
-	}
+	d.logger.Infof("drawer: finished %d polylines in %s", len(polylines), time.Since(startedAt).Round(time.Second))
 
 	if d.hasRestPose() {
 		if err := d.goToRestPose(ctx, fs); err != nil {
