@@ -606,6 +606,33 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 	return d.executeDraw(ctx, polylines)
 }
 
+// waypoint is one planned move in a drawing. linear marks the moves where the
+// pen is on the paper (or dropping onto it), which must follow a straight line;
+// the rest are travel and are left to the planner.
+type waypoint struct {
+	x, y, z float64
+	linear  bool
+	label   string
+}
+
+func drawWaypoints(polylines []Polyline, corner r3.Vector, zUp, zDown float64) []waypoint {
+	var out []waypoint
+	for i, poly := range polylines {
+		sx, sy := corner.X+poly[0][0], corner.Y+poly[0][1]
+		out = append(out,
+			waypoint{sx, sy, zUp, false, fmt.Sprintf("polyline %d approach", i)},
+			waypoint{sx, sy, zDown, true, fmt.Sprintf("polyline %d pen-down", i)},
+		)
+		for j := 1; j < len(poly); j++ {
+			px, py := corner.X+poly[j][0], corner.Y+poly[j][1]
+			out = append(out, waypoint{px, py, zDown, true, fmt.Sprintf("polyline %d point %d", i, j)})
+		}
+		lx, ly := corner.X+poly[len(poly)-1][0], corner.Y+poly[len(poly)-1][1]
+		out = append(out, waypoint{lx, ly, zUp, true, fmt.Sprintf("polyline %d pen-up", i)})
+	}
+	return out
+}
+
 func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[string]interface{}, error) {
 	fs, err := d.buildFrameSystem(ctx)
 	if err != nil {
@@ -625,29 +652,21 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		nil, nil, nil,
 	)
 
-	moveTo := func(x, y, z float64) error {
-		return d.planAndExecute(ctx, fs, spatialmath.NewPose(r3.Vector{X: x, Y: y, Z: z}, orientation), constraints)
-	}
-
 	total := 0
-	for i, poly := range polylines {
-		sx, sy := corner.X+poly[0][0], corner.Y+poly[0][1]
-		if err := moveTo(sx, sy, zUp); err != nil {
-			return nil, fmt.Errorf("drawer: polyline %d approach: %w", i, err)
+	for _, wp := range drawWaypoints(polylines, corner, zUp, zDown) {
+		// Only pen-contact moves are held to a straight line. Travel moves span
+		// the whole workspace, and a linear plan that far has no direct solution
+		// — cbirrt, which would find one, is not allowed under a linear constraint.
+		var c *motionplan.Constraints
+		if wp.linear {
+			c = constraints
 		}
-		if err := moveTo(sx, sy, zDown); err != nil {
-			return nil, fmt.Errorf("drawer: polyline %d pen-down: %w", i, err)
+		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
+		if err := d.planAndExecute(ctx, fs, target, c); err != nil {
+			return nil, fmt.Errorf("drawer: %s: %w", wp.label, err)
 		}
-		for j := 1; j < len(poly); j++ {
-			px, py := corner.X+poly[j][0], corner.Y+poly[j][1]
-			if err := moveTo(px, py, zDown); err != nil {
-				return nil, fmt.Errorf("drawer: polyline %d point %d: %w", i, j, err)
-			}
-		}
-		lx, ly := corner.X+poly[len(poly)-1][0], corner.Y+poly[len(poly)-1][1]
-		if err := moveTo(lx, ly, zUp); err != nil {
-			return nil, fmt.Errorf("drawer: polyline %d pen-up: %w", i, err)
-		}
+	}
+	for _, poly := range polylines {
 		total += len(poly)
 	}
 

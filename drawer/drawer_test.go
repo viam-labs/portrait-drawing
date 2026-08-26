@@ -484,3 +484,51 @@ func TestGoToRestPose_noneConfigured(t *testing.T) {
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "capture_pose")
 }
+
+func TestDrawWaypoints_approachIsNotLinear(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 5}}}, r3.Vector{X: 100, Y: 200, Z: 50}, 55, 50)
+	test.That(t, len(wps), test.ShouldEqual, 4)
+
+	test.That(t, wps[0].label, test.ShouldEqual, "polyline 0 approach")
+	test.That(t, wps[0].linear, test.ShouldBeFalse)
+	test.That(t, wps[0].z, test.ShouldEqual, 55.0)
+
+	for _, wp := range wps[1:] {
+		test.That(t, wp.linear, test.ShouldBeTrue)
+	}
+}
+
+func TestDrawWaypoints_everyPolylineTravelsFreely(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}}, {{5, 5}}, {{9, 9}}}, r3.Vector{}, 5, 0)
+	var free int
+	for _, wp := range wps {
+		if !wp.linear {
+			free++
+			test.That(t, wp.label, test.ShouldContainSubstring, "approach")
+		}
+	}
+	test.That(t, free, test.ShouldEqual, 3)
+}
+
+func TestDrawWaypoints_offsetsFromPaperCorner(t *testing.T) {
+	corner := r3.Vector{X: 100, Y: 200, Z: 50}
+	wps := drawWaypoints([]Polyline{{{3, 7}, {11, 13}}}, corner, 55, 50)
+
+	test.That(t, wps[1].label, test.ShouldEqual, "polyline 0 pen-down")
+	test.That(t, wps[1].x, test.ShouldEqual, 103.0)
+	test.That(t, wps[1].y, test.ShouldEqual, 207.0)
+	test.That(t, wps[1].z, test.ShouldEqual, 50.0)
+
+	test.That(t, wps[2].label, test.ShouldEqual, "polyline 0 point 1")
+	test.That(t, wps[2].x, test.ShouldEqual, 111.0)
+	test.That(t, wps[2].y, test.ShouldEqual, 213.0)
+}
+
+func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 20}}}, r3.Vector{}, 5, 0)
+	last := wps[len(wps)-1]
+	test.That(t, last.label, test.ShouldEqual, "polyline 0 pen-up")
+	test.That(t, last.x, test.ShouldEqual, 10.0)
+	test.That(t, last.y, test.ShouldEqual, 20.0)
+	test.That(t, last.z, test.ShouldEqual, 5.0)
+}
