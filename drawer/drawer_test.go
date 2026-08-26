@@ -545,3 +545,62 @@ func TestDrawWaypoints_onlyPenUpEndsAPolyline(t *testing.T) {
 	}
 	test.That(t, ends, test.ShouldEqual, 2)
 }
+
+func TestConfigValidate_allowedCollisionNeedsBothFrames(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		AllowedCollisions:  []AllowedCollision{{Frame1: "camera-1_origin"}},
+	}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "allowed_collisions[0]")
+}
+
+func TestCollisionSpecs_emptyIsNil(t *testing.T) {
+	test.That(t, collisionSpecs(nil), test.ShouldBeNil)
+	test.That(t, collisionSpecs([]AllowedCollision{}), test.ShouldBeNil)
+}
+
+func TestCollisionSpecs_mapsEveryPair(t *testing.T) {
+	specs := collisionSpecs([]AllowedCollision{
+		{Frame1: "arm-1:wrist_link", Frame2: "camera-1_origin"},
+		{Frame1: "arm-1:forearm_link", Frame2: "camera-1_origin"},
+	})
+	test.That(t, len(specs), test.ShouldEqual, 1)
+	test.That(t, len(specs[0].Allows), test.ShouldEqual, 2)
+	test.That(t, specs[0].Allows[0].Frame1, test.ShouldEqual, "arm-1:wrist_link")
+	test.That(t, specs[0].Allows[1].Frame2, test.ShouldEqual, "camera-1_origin")
+}
+
+func TestConstraints_travelCarriesAllowancesWithoutLinear(t *testing.T) {
+	d := &drawer{
+		logger:         logging.NewTestLogger(t),
+		cfg:            &Config{},
+		collisionSpecs: collisionSpecs([]AllowedCollision{{Frame1: "a", Frame2: "b"}}),
+	}
+	c := d.constraints(false)
+	test.That(t, c, test.ShouldNotBeNil)
+	test.That(t, len(c.LinearConstraint), test.ShouldEqual, 0)
+	test.That(t, len(c.CollisionSpecification), test.ShouldEqual, 1)
+}
+
+func TestConstraints_penContactAddsLinear(t *testing.T) {
+	d := &drawer{
+		logger:         logging.NewTestLogger(t),
+		cfg:            &Config{},
+		collisionSpecs: collisionSpecs([]AllowedCollision{{Frame1: "a", Frame2: "b"}}),
+	}
+	c := d.constraints(true)
+	test.That(t, len(c.LinearConstraint), test.ShouldEqual, 1)
+	test.That(t, c.LinearConstraint[0].LineToleranceMm, test.ShouldEqual, drawLineToleranceMM)
+	test.That(t, len(c.CollisionSpecification), test.ShouldEqual, 1)
+}
+
+func TestConstraints_nilWhenNothingApplies(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	test.That(t, d.constraints(false), test.ShouldBeNil)
+	test.That(t, d.constraints(true), test.ShouldNotBeNil)
+}

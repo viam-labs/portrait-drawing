@@ -46,7 +46,37 @@ DoCommand, no image data passing through your hands.
 | `stroke_generator` | string | no | A `stroke-generator` service. Required for `draw_image` and `capture_and_draw`. |
 | `photo` | string | no | A camera the drawer triggers and reads in `capture_and_draw` — a [frame-buffer](https://github.com/viam-labs/frame-buffer) camera pointed at your real camera. |
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
+| `allowed_collisions` | array | no | Frame pairs the planner should not treat as a collision. See [Anything bolted to the arm](#anything-bolted-to-the-arm). |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
+
+### Anything bolted to the arm
+
+A wrist-mounted camera, a pen holder, a bracket — anything rigidly attached to a
+link overlaps that link's geometry in *every* configuration. The planner cannot
+tell that apart from a real collision, so it rejects every IK solution:
+
+```
+all IK solutions failed constraints. Failures: { self-collision constraint:
+violation between arm-1:wrist_link and camera-1_origin geometries: 100.00% }
+```
+
+The `100.00%` is the giveaway: a genuine collision is pose-dependent, so it fails
+some fraction of solutions. Failing all of them means the two shapes always
+overlap.
+
+Declare the pair as allowed rather than deleting the attachment's geometry —
+the geometry is what stops a wrist camera from being driven into the table:
+
+```json
+"allowed_collisions": [
+  { "frame1": "arm-1:wrist_link", "frame2": "camera-1_origin" }
+]
+```
+
+Use the frame names exactly as the planner prints them in that error. Note that a
+component's geometry hangs off its `_origin` frame, not its bare name.
+
+Allowances apply to every move the drawer plans, travel and drawing alike.
 
 ### The rest pose
 
