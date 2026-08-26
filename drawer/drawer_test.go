@@ -310,3 +310,80 @@ func TestBuildFrameSystemAppliesInputRangeOverride(t *testing.T) {
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "input_range_override")
 }
+
+func TestConfigValidate_photoWithoutStrokeGenerator(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		Photo:              "photo",
+	}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "stroke_generator")
+}
+
+func TestConfigValidate_photoAndPreviewCameraInDeps(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		StrokeGenerator:    "my-generator",
+		Photo:              "photo",
+		PreviewCamera:      "line-preview",
+	}
+	deps, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldResemble, []string{"my-arm", "my-generator", "photo", "line-preview"})
+}
+
+func TestParseCaptureAndDrawArgs_defaultsPreviewScale(t *testing.T) {
+	got, err := parseCaptureAndDrawArgs(map[string]interface{}{"preview": true})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.Preview, test.ShouldBeTrue)
+	test.That(t, got.PreviewPxPerMM, test.ShouldEqual, defaultPreviewPxPerMM)
+}
+
+func TestParseCaptureAndDrawArgs_emptyPayloadIsValid(t *testing.T) {
+	got, err := parseCaptureAndDrawArgs(map[string]interface{}{})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.Preview, test.ShouldBeFalse)
+	test.That(t, got.Rotate, test.ShouldEqual, 0)
+}
+
+func TestParseCaptureAndDrawArgs_badRotate(t *testing.T) {
+	_, err := parseCaptureAndDrawArgs(map[string]interface{}{"rotate": 45})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "rotate")
+}
+
+func TestParseCaptureAndDrawArgs_negativePreviewScale(t *testing.T) {
+	_, err := parseCaptureAndDrawArgs(map[string]interface{}{"preview_px_per_mm": -2.0})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "preview_px_per_mm")
+}
+
+func TestCaptureAndDraw_missingPhoto(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	_, err := d.captureAndDraw(context.Background(), map[string]interface{}{})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "photo")
+}
+
+func TestDrawOrPreview_returnsBase64WhenNoPreviewCamera(t *testing.T) {
+	d := &drawer{
+		logger: logging.NewTestLogger(t),
+		cfg:    &Config{PaperWidthMM: 100, PaperHeightMM: 60},
+	}
+	polylines := []Polyline{{{0, 0}, {10, 10}}, {{20, 20}, {30, 25}, {40, 30}}}
+	resp, err := d.drawOrPreview(context.Background(), polylines, &strokeArgs{Preview: true, PreviewPxPerMM: 2})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["preview"], test.ShouldEqual, true)
+	test.That(t, resp["polyline_count"], test.ShouldEqual, 2)
+	test.That(t, resp["total_points"], test.ShouldEqual, 5)
+	test.That(t, resp["preview_png_b64"], test.ShouldNotBeNil)
+	_, hasCamera := resp["preview_camera"]
+	test.That(t, hasCamera, test.ShouldBeFalse)
+}
