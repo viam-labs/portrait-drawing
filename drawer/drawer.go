@@ -3,6 +3,7 @@ package drawer
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/motionplan/armplanning"
@@ -51,7 +53,15 @@ type Config struct {
 	// StrokeGenerator, if set, is the name of a stroke-generator service
 	// the drawer calls from the draw_image verb to turn a photo into
 	// polylines in one DoCommand.
-	StrokeGenerator    string                                     `json:"stroke_generator,omitempty"`
+	StrokeGenerator string `json:"stroke_generator,omitempty"`
+	// Photo, if set, is the name of a frame-buffer camera the drawer
+	// triggers and then reads from in the capture_and_draw verb. The camera
+	// is assumed to be on the arm, so HomePose doubles as the capture pose.
+	Photo string `json:"photo,omitempty"`
+	// PreviewCamera, if set, is the name of a frame-buffer camera the drawer
+	// pushes rendered previews into, so they are viewable in the Viam app
+	// instead of coming back as base64.
+	PreviewCamera      string                                     `json:"preview_camera,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 }
 
@@ -62,6 +72,7 @@ type poseConfig struct {
 
 const (
 	defaultLiftOffZMM               = 5.0
+	defaultPreviewPxPerMM           = 2.0
 	drawLineToleranceMM             = 0.5
 	drawOrientationToleranceDegrees = 1.0
 )
@@ -89,9 +100,18 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.HomePose != nil && cfg.HomePose.Orientation == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "home_pose.orientation")
 	}
+	if cfg.Photo != "" && cfg.StrokeGenerator == "" {
+		return nil, nil, errors.New("photo is set but stroke_generator is not; capture_and_draw needs both")
+	}
 	deps := []string{cfg.Arm}
 	if cfg.StrokeGenerator != "" {
 		deps = append(deps, cfg.StrokeGenerator)
+	}
+	if cfg.Photo != "" {
+		deps = append(deps, cfg.Photo)
+	}
+	if cfg.PreviewCamera != "" {
+		deps = append(deps, cfg.PreviewCamera)
 	}
 	return deps, nil, nil
 }
@@ -108,6 +128,8 @@ type drawer struct {
 	paperTopLeftCorner spatialmath.Pose
 	homePose           spatialmath.Pose
 	strokeGenerator    resource.Resource
+	photo              camera.Camera
+	previewCamera      camera.Camera
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -153,6 +175,19 @@ func newDrawer(
 			return nil, fmt.Errorf("drawer: get stroke_generator dep %q: %w", cfg.StrokeGenerator, err)
 		}
 	}
+	var photo, previewCamera camera.Camera
+	if cfg.Photo != "" {
+		photo, err = camera.FromProvider(deps, cfg.Photo)
+		if err != nil {
+			return nil, fmt.Errorf("drawer: get photo dep %q: %w", cfg.Photo, err)
+		}
+	}
+	if cfg.PreviewCamera != "" {
+		previewCamera, err = camera.FromProvider(deps, cfg.PreviewCamera)
+		if err != nil {
+			return nil, fmt.Errorf("drawer: get preview_camera dep %q: %w", cfg.PreviewCamera, err)
+		}
+	}
 	return &drawer{
 		name:               conf.ResourceName(),
 		logger:             logger,
@@ -162,6 +197,8 @@ func newDrawer(
 		paperTopLeftCorner: spatialmath.NewPose(cfg.PaperTopLeftCorner.Translation, orientation),
 		homePose:           homePose,
 		strokeGenerator:    gen,
+		photo:              photo,
+		previewCamera:      previewCamera,
 	}, nil
 }
 
@@ -215,12 +252,15 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		return d.draw(ctx, cmd["draw"])
 	case "draw_image":
 		return d.drawImage(ctx, cmd["draw_image"])
+	case "capture_and_draw":
+		return d.captureAndDraw(ctx, cmd["capture_and_draw"])
 	case "cancel":
 		return d.cancel(ctx)
 	case "go_home":
 		return d.goHome(ctx)
 	default:
-		return nil, fmt.Errorf("drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"cancel\", or \"go_home\"", v)
+		return nil, fmt.Errorf(
+			"drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"capture_and_draw\", \"cancel\", or \"go_home\"", v)
 	}
 }
 
@@ -276,18 +316,45 @@ func (d *drawer) cancel(ctx context.Context) (map[string]interface{}, error) {
 	return map[string]interface{}{"canceled": true}, nil
 }
 
-// drawImageArgs is the DoCommand payload for the "draw_image" verb.
-// Paper geometry is not here — the drawer already knows paper_width_mm
-// and paper_height_mm from its own config and forwards them to the
-// stroke_generator.
-type drawImageArgs struct {
-	ImageB64 string  `json:"image_b64"`
+// strokeArgs are the stroke-generation options shared by the verbs that turn a
+// photo into polylines. Paper geometry is not here — the drawer already knows
+// paper_width_mm and paper_height_mm from its own config and forwards them to
+// the stroke_generator.
+type strokeArgs struct {
 	MarginMM float64 `json:"margin_mm"`
 	Rotate   int     `json:"rotate"`
 	Mirror   bool    `json:"mirror"`
 	// AutoRotate, when nil, defaults to true — the generator picks between
 	// 0° and 90° to maximize paper coverage. Set to false to use Rotate.
 	AutoRotate *bool `json:"auto_rotate,omitempty"`
+	// Preview renders the strokes instead of drawing them, so a bad
+	// extraction can be spotted before the arm commits to it.
+	Preview        bool    `json:"preview,omitempty"`
+	PreviewPxPerMM float64 `json:"preview_px_per_mm,omitempty"`
+}
+
+func (a *strokeArgs) validate() error {
+	if a.MarginMM < 0 {
+		return fmt.Errorf("margin_mm must be >= 0, got %g", a.MarginMM)
+	}
+	switch a.Rotate {
+	case 0, 90, 180, 270:
+	default:
+		return fmt.Errorf("rotate must be 0, 90, 180, or 270, got %d", a.Rotate)
+	}
+	if a.PreviewPxPerMM < 0 {
+		return fmt.Errorf("preview_px_per_mm must be >= 0 (0 uses the default), got %g", a.PreviewPxPerMM)
+	}
+	if a.PreviewPxPerMM == 0 {
+		a.PreviewPxPerMM = defaultPreviewPxPerMM
+	}
+	return nil
+}
+
+// drawImageArgs is the DoCommand payload for the "draw_image" verb.
+type drawImageArgs struct {
+	ImageB64 string `json:"image_b64"`
+	strokeArgs
 }
 
 func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
@@ -296,19 +363,29 @@ func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
 	var a drawImageArgs
-	if err := json.Unmarshal(raw, &a); err != nil {
-		return nil, fmt.Errorf("parse payload: %w", err)
+	if unmarshalErr := json.Unmarshal(raw, &a); unmarshalErr != nil {
+		return nil, fmt.Errorf("parse payload: %w", unmarshalErr)
 	}
 	if a.ImageB64 == "" {
 		return nil, errors.New("image_b64 is required")
 	}
-	if a.MarginMM < 0 {
-		return nil, fmt.Errorf("margin_mm must be >= 0, got %g", a.MarginMM)
+	if err := a.validate(); err != nil {
+		return nil, err
 	}
-	switch a.Rotate {
-	case 0, 90, 180, 270:
-	default:
-		return nil, fmt.Errorf("rotate must be 0, 90, 180, or 270, got %d", a.Rotate)
+	return &a, nil
+}
+
+func parseCaptureAndDrawArgs(payload interface{}) (*strokeArgs, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	var a strokeArgs
+	if unmarshalErr := json.Unmarshal(raw, &a); unmarshalErr != nil {
+		return nil, fmt.Errorf("parse payload: %w", unmarshalErr)
+	}
+	if err := a.validate(); err != nil {
+		return nil, err
 	}
 	return &a, nil
 }
@@ -327,8 +404,78 @@ func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[str
 	}
 	defer release()
 
+	polylines, err := d.generateStrokes(ctx, a.ImageB64, &a.strokeArgs)
+	if err != nil {
+		return nil, err
+	}
+	return d.drawOrPreview(ctx, polylines, &a.strokeArgs)
+}
+
+// captureAndDraw is the whole in-app loop: pose the arm so the camera frames
+// the subject, trigger the shot, and draw what comes back.
+func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
+	if d.photo == nil {
+		return nil, errors.New("drawer: capture_and_draw requires photo to be configured")
+	}
+	if d.strokeGenerator == nil {
+		return nil, errors.New("drawer: capture_and_draw requires stroke_generator to be configured")
+	}
+	a, err := parseCaptureAndDrawArgs(payload)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	ctx, release, err := d.acquireDrawSlot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	if d.homePose != nil {
+		fs, fsErr := d.buildFrameSystem(ctx)
+		if fsErr != nil {
+			return nil, fsErr
+		}
+		if moveErr := d.planAndExecute(ctx, fs, d.homePose, nil); moveErr != nil {
+			return nil, fmt.Errorf("drawer: move to capture pose: %w", moveErr)
+		}
+	} else {
+		d.logger.Warn("drawer: capture_and_draw with no home_pose configured; capturing from the arm's current pose")
+	}
+
+	imageB64, err := d.capturePhoto(ctx)
+	if err != nil {
+		return nil, err
+	}
+	polylines, err := d.generateStrokes(ctx, imageB64, a)
+	if err != nil {
+		return nil, err
+	}
+	return d.drawOrPreview(ctx, polylines, a)
+}
+
+// capturePhoto triggers the photo camera and reads back what it latched. The
+// countdown and image encoding are the photo camera's business, not the drawer's.
+func (d *drawer) capturePhoto(ctx context.Context) (string, error) {
+	if _, err := d.photo.DoCommand(ctx, map[string]interface{}{"capture": map[string]interface{}{}}); err != nil {
+		return "", fmt.Errorf("drawer: trigger photo %q: %w", d.cfg.Photo, err)
+	}
+	images, _, err := d.photo.Images(ctx, nil, nil)
+	if err != nil {
+		return "", fmt.Errorf("drawer: read photo %q: %w", d.cfg.Photo, err)
+	}
+	if len(images) == 0 {
+		return "", fmt.Errorf("drawer: photo %q returned no images", d.cfg.Photo)
+	}
+	raw, err := images[0].Bytes(ctx)
+	if err != nil {
+		return "", fmt.Errorf("drawer: read photo bytes: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(raw), nil
+}
+
+func (d *drawer) generateStrokes(ctx context.Context, imageB64 string, a *strokeArgs) ([]Polyline, error) {
 	inner := map[string]interface{}{
-		"image_b64":       a.ImageB64,
+		"image_b64":       imageB64,
 		"paper_width_mm":  d.cfg.PaperWidthMM,
 		"paper_height_mm": d.cfg.PaperHeightMM,
 		"margin_mm":       a.MarginMM,
@@ -346,7 +493,38 @@ func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[str
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
-	return d.executeDraw(ctx, polylines)
+	return polylines, nil
+}
+
+func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *strokeArgs) (map[string]interface{}, error) {
+	if !a.Preview {
+		return d.executeDraw(ctx, polylines)
+	}
+	rendered, err := renderPreviewPNG(polylines, d.cfg.PaperWidthMM, d.cfg.PaperHeightMM, a.PreviewPxPerMM)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	total := 0
+	for _, poly := range polylines {
+		total += len(poly)
+	}
+	resp := map[string]interface{}{
+		"preview":        true,
+		"polyline_count": len(polylines),
+		"total_points":   total,
+	}
+	encoded := base64.StdEncoding.EncodeToString(rendered)
+	if d.previewCamera == nil {
+		resp["preview_png_b64"] = encoded
+		return resp, nil
+	}
+	if _, err := d.previewCamera.DoCommand(ctx, map[string]interface{}{
+		"set_image": map[string]interface{}{"image_b64": encoded, "source_name": "line-preview"},
+	}); err != nil {
+		return nil, fmt.Errorf("drawer: push preview to %q: %w", d.cfg.PreviewCamera, err)
+	}
+	resp["preview_camera"] = d.cfg.PreviewCamera
+	return resp, nil
 }
 
 func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
