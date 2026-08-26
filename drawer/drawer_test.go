@@ -387,3 +387,100 @@ func TestDrawOrPreview_returnsBase64WhenNoPreviewCamera(t *testing.T) {
 	_, hasCamera := resp["preview_camera"]
 	test.That(t, hasCamera, test.ShouldBeFalse)
 }
+
+func TestConfigValidate_capturePoseInDeps(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		CapturePose:        "camera-framing",
+	}
+	deps, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldResemble, []string{"my-arm", "camera-framing"})
+}
+
+func TestConfigValidate_capturePoseAndHomePoseConflict(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		HomePose:           validCorner(),
+		CapturePose:        "camera-framing",
+	}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "capture_pose")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "home_pose")
+}
+
+func switchWithLabels(name string, labels []string, setPosition *uint32) *inject.Switch {
+	sw := inject.NewSwitch(name)
+	sw.GetNumberOfPositionsFunc = func(_ context.Context, _ map[string]interface{}) (uint32, []string, error) {
+		return uint32(len(labels)), labels, nil
+	}
+	sw.SetPositionFunc = func(_ context.Context, position uint32, _ map[string]interface{}) error {
+		*setPosition = position
+		return nil
+	}
+	return sw
+}
+
+func TestCapturePoseGoToPosition_findsLabel(t *testing.T) {
+	var got uint32
+	d := &drawer{
+		logger:      logging.NewTestLogger(t),
+		cfg:         &Config{CapturePose: "camera-framing"},
+		capturePose: switchWithLabels("camera-framing", []string{"idle", "update config", "go to"}, &got),
+	}
+	position, err := d.capturePoseGoToPosition(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, position, test.ShouldEqual, uint32(2))
+}
+
+func TestCapturePoseGoToPosition_labelIndexNotHardcoded(t *testing.T) {
+	var got uint32
+	d := &drawer{
+		logger:      logging.NewTestLogger(t),
+		cfg:         &Config{CapturePose: "camera-framing"},
+		capturePose: switchWithLabels("camera-framing", []string{"Go To", "idle"}, &got),
+	}
+	position, err := d.capturePoseGoToPosition(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, position, test.ShouldEqual, uint32(0))
+}
+
+func TestCapturePoseGoToPosition_missingLabel(t *testing.T) {
+	var got uint32
+	d := &drawer{
+		logger:      logging.NewTestLogger(t),
+		cfg:         &Config{CapturePose: "some-switch"},
+		capturePose: switchWithLabels("some-switch", []string{"off", "on"}, &got),
+	}
+	_, err := d.capturePoseGoToPosition(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "go to")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "arm-position-saver")
+}
+
+func TestGoToRestPose_usesSwitch(t *testing.T) {
+	var got uint32
+	d := &drawer{
+		logger:      logging.NewTestLogger(t),
+		cfg:         &Config{CapturePose: "camera-framing"},
+		capturePose: switchWithLabels("camera-framing", []string{"idle", "update config", "go to"}, &got),
+	}
+	test.That(t, d.hasRestPose(), test.ShouldBeTrue)
+	test.That(t, d.goToRestPose(context.Background(), nil), test.ShouldBeNil)
+	test.That(t, got, test.ShouldEqual, uint32(2))
+}
+
+func TestGoToRestPose_noneConfigured(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	test.That(t, d.hasRestPose(), test.ShouldBeFalse)
+	err := d.goToRestPose(context.Background(), nil)
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "capture_pose")
+}

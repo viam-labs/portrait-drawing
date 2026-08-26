@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/camera"
+	toggleswitch "go.viam.com/rdk/components/switch"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/motionplan/armplanning"
@@ -47,9 +49,14 @@ type Config struct {
 	PaperWidthMM       float64     `json:"paper_width_mm"`
 	PaperHeightMM      float64     `json:"paper_height_mm"`
 	LiftOffZMM         float64     `json:"lift_off_z_mm,omitempty"`
-	// HomePose, if set, is the tool pose the arm returns to after the last
-	// polyline is drawn.
+	// HomePose, if set, is the tool pose the arm rests at between drawings.
+	// CapturePose takes precedence over it when both are set.
 	HomePose *poseConfig `json:"home_pose,omitempty"`
+	// CapturePose, if set, names an arm-position-saver switch holding the
+	// pose the arm rests at — the one its camera frames the subject from.
+	// Preferred over HomePose: the pose is taught by jogging the arm rather
+	// than by working out tool coordinates by hand.
+	CapturePose string `json:"capture_pose,omitempty"`
 	// StrokeGenerator, if set, is the name of a stroke-generator service
 	// the drawer calls from the draw_image verb to turn a photo into
 	// polylines in one DoCommand.
@@ -71,8 +78,13 @@ type poseConfig struct {
 }
 
 const (
-	defaultLiftOffZMM               = 5.0
-	defaultPreviewPxPerMM           = 2.0
+	defaultLiftOffZMM     = 5.0
+	defaultPreviewPxPerMM = 2.0
+	// capturePoseGoToLabel is the switch position an arm-position-saver
+	// labels "go to". Matching the label rather than hardcoding an index
+	// means a reordered or unrelated switch fails loudly instead of moving
+	// the arm somewhere unintended.
+	capturePoseGoToLabel            = "go to"
 	drawLineToleranceMM             = 0.5
 	drawOrientationToleranceDegrees = 1.0
 )
@@ -100,6 +112,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.HomePose != nil && cfg.HomePose.Orientation == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "home_pose.orientation")
 	}
+	if cfg.CapturePose != "" && cfg.HomePose != nil {
+		return nil, nil, errors.New("capture_pose and home_pose are both set; capture_pose supersedes home_pose, so set only one")
+	}
 	if cfg.Photo != "" && cfg.StrokeGenerator == "" {
 		return nil, nil, errors.New("photo is set but stroke_generator is not; capture_and_draw needs both")
 	}
@@ -112,6 +127,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.PreviewCamera != "" {
 		deps = append(deps, cfg.PreviewCamera)
+	}
+	if cfg.CapturePose != "" {
+		deps = append(deps, cfg.CapturePose)
 	}
 	return deps, nil, nil
 }
@@ -130,6 +148,7 @@ type drawer struct {
 	strokeGenerator    resource.Resource
 	photo              camera.Camera
 	previewCamera      camera.Camera
+	capturePose        toggleswitch.Switch
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -188,6 +207,13 @@ func newDrawer(
 			return nil, fmt.Errorf("drawer: get preview_camera dep %q: %w", cfg.PreviewCamera, err)
 		}
 	}
+	var capturePose toggleswitch.Switch
+	if cfg.CapturePose != "" {
+		capturePose, err = toggleswitch.FromProvider(deps, cfg.CapturePose)
+		if err != nil {
+			return nil, fmt.Errorf("drawer: get capture_pose dep %q: %w", cfg.CapturePose, err)
+		}
+	}
 	return &drawer{
 		name:               conf.ResourceName(),
 		logger:             logger,
@@ -199,6 +225,7 @@ func newDrawer(
 		strokeGenerator:    gen,
 		photo:              photo,
 		previewCamera:      previewCamera,
+		capturePose:        capturePose,
 	}, nil
 }
 
@@ -264,9 +291,56 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 	}
 }
 
-func (d *drawer) goHome(parent context.Context) (map[string]interface{}, error) {
+// hasRestPose reports whether the arm has somewhere to sit between drawings.
+func (d *drawer) hasRestPose() bool {
+	return d.capturePose != nil || d.homePose != nil
+}
+
+// goToRestPose moves the arm to the pose it rests at between drawings — which
+// is also the pose capture_and_draw shoots from. Pass fs to reuse an already
+// built frame system; nil builds one.
+func (d *drawer) goToRestPose(ctx context.Context, fs *referenceframe.FrameSystem) error {
+	if d.capturePose != nil {
+		position, err := d.capturePoseGoToPosition(ctx)
+		if err != nil {
+			return err
+		}
+		if err := d.capturePose.SetPosition(ctx, position, nil); err != nil {
+			return fmt.Errorf("move capture_pose %q to position %d: %w", d.cfg.CapturePose, position, err)
+		}
+		return nil
+	}
 	if d.homePose == nil {
-		return nil, errors.New("drawer: home_pose is not configured")
+		return errors.New("neither capture_pose nor home_pose is configured")
+	}
+	if fs == nil {
+		built, err := d.buildFrameSystem(ctx)
+		if err != nil {
+			return err
+		}
+		fs = built
+	}
+	return d.planAndExecute(ctx, fs, d.homePose, nil)
+}
+
+func (d *drawer) capturePoseGoToPosition(ctx context.Context) (uint32, error) {
+	count, labels, err := d.capturePose.GetNumberOfPositions(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("read positions of capture_pose %q: %w", d.cfg.CapturePose, err)
+	}
+	for i, label := range labels {
+		if strings.EqualFold(strings.TrimSpace(label), capturePoseGoToLabel) {
+			return uint32(i), nil
+		}
+	}
+	return 0, fmt.Errorf(
+		"capture_pose %q has no %q position (%d positions, labels %v); expected an arm-position-saver switch",
+		d.cfg.CapturePose, capturePoseGoToLabel, count, labels)
+}
+
+func (d *drawer) goHome(parent context.Context) (map[string]interface{}, error) {
+	if !d.hasRestPose() {
+		return nil, errors.New("drawer: neither capture_pose nor home_pose is configured")
 	}
 	ctx, release, err := d.acquireDrawSlot(parent)
 	if err != nil {
@@ -274,11 +348,7 @@ func (d *drawer) goHome(parent context.Context) (map[string]interface{}, error) 
 	}
 	defer release()
 
-	fs, err := d.buildFrameSystem(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if err := d.planAndExecute(ctx, fs, d.homePose, nil); err != nil {
+	if err := d.goToRestPose(ctx, nil); err != nil {
 		return nil, fmt.Errorf("drawer: go_home: %w", err)
 	}
 	return map[string]interface{}{"status": "ok"}, nil
@@ -430,16 +500,12 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 	}
 	defer release()
 
-	if d.homePose != nil {
-		fs, fsErr := d.buildFrameSystem(ctx)
-		if fsErr != nil {
-			return nil, fsErr
-		}
-		if moveErr := d.planAndExecute(ctx, fs, d.homePose, nil); moveErr != nil {
+	if d.hasRestPose() {
+		if moveErr := d.goToRestPose(ctx, nil); moveErr != nil {
 			return nil, fmt.Errorf("drawer: move to capture pose: %w", moveErr)
 		}
 	} else {
-		d.logger.Warn("drawer: capture_and_draw with no home_pose configured; capturing from the arm's current pose")
+		d.logger.Warn("drawer: capture_and_draw with no capture_pose or home_pose configured; capturing from the arm's current pose")
 	}
 
 	imageB64, err := d.capturePhoto(ctx)
@@ -585,9 +651,9 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		total += len(poly)
 	}
 
-	if d.homePose != nil {
-		if err := d.planAndExecute(ctx, fs, d.homePose, nil); err != nil {
-			return nil, fmt.Errorf("drawer: return to home: %w", err)
+	if d.hasRestPose() {
+		if err := d.goToRestPose(ctx, fs); err != nil {
+			return nil, fmt.Errorf("drawer: return to rest pose: %w", err)
 		}
 	}
 
