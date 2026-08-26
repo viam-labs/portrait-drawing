@@ -27,10 +27,7 @@ DoCommand, no image data passing through your hands.
   },
   "paper_width_mm": 215.9,
   "paper_height_mm": 279.4,
-  "home_pose": {
-    "translation": { "x": 254, "y": 5, "z": 551 },
-    "orientation": { "type": "ov_degrees", "value": { "x": 0.127, "y": 0.011, "z": -0.992, "th": 5.19 } }
-  },
+  "capture_pose": "camera-framing",
   "stroke_generator": "stroke-generator",
   "photo": "photo",
   "preview_camera": "line-preview"
@@ -44,17 +41,51 @@ DoCommand, no image data passing through your hands.
 | `paper_width_mm` | number | **yes** | Paper width. |
 | `paper_height_mm` | number | **yes** | Paper height. |
 | `lift_off_z_mm` | number | no | How far the pen lifts between strokes. Defaults to 5. |
-| `home_pose` | pose | no | Where the arm parks after a drawing — and, for `capture_and_draw`, the pose it captures from. |
+| `capture_pose` | string | no | An [arm-position-saver](https://github.com/erh/vmodutils) switch holding the pose the arm rests at — the same pose `capture_and_draw` shoots from. Preferred over `home_pose`. |
+| `home_pose` | pose | no | The same idea as `capture_pose`, written as literal tool coordinates. Set one or the other, not both. |
 | `stroke_generator` | string | no | A `stroke-generator` service. Required for `draw_image` and `capture_and_draw`. |
 | `photo` | string | no | A camera the drawer triggers and reads in `capture_and_draw` — a [frame-buffer](https://github.com/viam-labs/frame-buffer) camera pointed at your real camera. |
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
 
+### The rest pose
+
+The arm has one pose it lives at between drawings: it starts there, it shoots
+from there, and it returns there when a drawing finishes. Framing a subject and
+parking are the same job, so they are the same pose.
+
+Set it with `capture_pose`, naming an
+[arm-position-saver](https://github.com/erh/vmodutils) switch:
+
+```json
+{
+  "name": "camera-framing",
+  "api": "rdk:component:switch",
+  "model": "erh:vmodutils:arm-position-saver",
+  "attributes": { "arm": "arm-1" }
+}
+```
+
+Teach it by jogging the arm until the camera frames where a subject will sit,
+then setting the switch to **"update config"** — it writes the joint angles into
+its own config. The drawer moves there by setting the switch to **"go to"**.
+
+Leave the switch's `motion` attribute unset so it saves and replays joint
+angles: joint-space is exactly repeatable, and there is nothing to plan around
+on the way back to a pose the arm just came from.
+
+`home_pose` does the same job with literal tool coordinates, and still works.
+Setting both is a config error — pick the one you want to be the source of
+truth.
+
+With neither set, `capture_and_draw` shoots from wherever the arm happens to be
+and logs a warning, and `go_home` returns an error.
+
 ### `capture_and_draw`
 
-The whole loop in one command. The arm moves to `home_pose`, the `photo` camera
-is triggered (it owns the countdown), and the resulting photo goes through the
-stroke generator and onto the paper.
+The whole loop in one command. The arm moves to the rest pose, the `photo`
+camera is triggered (it owns the countdown), and the resulting photo goes
+through the stroke generator and onto the paper.
 
 ```json
 {"capture_and_draw": {}}
@@ -118,8 +149,8 @@ top-left corner. This is what the other verbs call underneath.
 
 ### `cancel` and `go_home`
 
-`cancel` aborts whatever is drawing and stops the arm. `go_home` moves to
-`home_pose`. Only one draw runs at a time — starting a second returns an error
+`cancel` aborts whatever is drawing and stops the arm. `go_home` moves to the
+rest pose. Only one draw runs at a time — starting a second returns an error
 telling you to cancel the first.
 
 ```json
