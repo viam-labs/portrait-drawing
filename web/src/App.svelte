@@ -6,6 +6,7 @@
   import Panel from './lib/Panel.svelte'
   import Progress from './lib/Progress.svelte'
   import Phase from './lib/Phase.svelte'
+  import Rotatable from './lib/Rotatable.svelte'
 
   const POLL_MS = 1000
 
@@ -101,7 +102,7 @@
       </Panel>
       <Panel title="Line art" subtitle="what the arm is drawing">
         {#if lineArt}
-          <img src={lineArt} alt="the generated line drawing" />
+          <Rotatable src={lineArt} alt="the generated line drawing" />
         {:else}
           <p class="muted">Nothing generated yet.</p>
         {/if}
