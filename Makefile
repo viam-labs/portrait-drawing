@@ -12,7 +12,10 @@ models:
 	bash ./fetch_models.sh
 
 web:
-	cd web && npm ci && npm run build
+	# npm ci can fail to place a platform's native binary when the lockfile was
+	# written by a different npm (npm/cli#4828). Its own advice is to reinstall
+	# from scratch, so do that rather than fail the release.
+	cd web && { npm ci || { rm -rf node_modules package-lock.json && npm install; }; } && npm run build
 
 system-deps:
 	bash ./setup.sh
