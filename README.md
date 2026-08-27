@@ -226,12 +226,46 @@ Every attribute is optional; the defaults are tuned for portraits.
 | `face_detail` | number | Extra density inside a detected face, so features survive when the background is simplified. |
 | `face_size_px` | int | Size the detected face is normalised to before detail is applied. |
 | `isolate_subject` | bool | Drop the background and keep the person. Defaults to true. |
+| `crop_face` | bool | Crop to the subject before tracing. Defaults to false. See [Framing](#framing). |
+| `crop_above`, `crop_below`, `crop_sides` | number | Crop margins in multiples of the detected face box. Default `1.2`, `2.0`, `1.5`. |
 | `region`, `low`, `high` | int | Adaptive-threshold region and Canny hysteresis bounds. |
 | `merge`, `prune`, `min_len` | int | Contour merging distance, spur pruning length, and the shortest polyline kept. |
 | `smooth`, `min_dist` | number | Curve smoothing and the minimum spacing between retained points. |
 
 Face-aware detail needs the YuNet face model on the machine; without it the
 pipeline still runs with uniform detail.
+
+### Framing
+
+The pipeline normalises resolution by face size and detail by edge density, but
+not composition. A photo taken from across a room spends most of the paper on
+torso, chair and room; the face ends up a fifth of the drawing, and at that size
+its features do not survive tracing. Detail settings cannot recover this — there
+is nothing wrong with the thresholds, the face is simply too small.
+
+`crop_face` crops to the subject first, in multiples of the detected face box,
+so framing stays consistent however far away the subject sits:
+
+```json
+{
+  "crop_face": true,
+  "crop_above": 0.55,
+  "crop_below": 0.1,
+  "crop_sides": 1.1
+}
+```
+
+Those values give a head-and-shoulders portrait. `crop_below` is usually the one
+worth tuning: it decides how much of the body — and anything on the desk in
+front of the subject — comes along.
+
+If no face is detected the image is left uncropped, so a missed detection costs
+framing rather than the whole drawing.
+
+Cropping changes the image's aspect ratio, which changes what `auto_rotate`
+chooses. If the paper's orientation is fixed by how the arm is mounted, set
+`auto_rotate: false` and an explicit `rotate` rather than letting it swing on
+the crop shape.
 
 ### `generate`
 

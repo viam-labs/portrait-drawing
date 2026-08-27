@@ -2,6 +2,7 @@ package strokegenerator
 
 import (
 	"encoding/base64"
+	"strings"
 	"testing"
 
 	"go.viam.com/test"
@@ -193,4 +194,40 @@ func TestBuildCLIArgs_isolateSubjectDisabled(t *testing.T) {
 	})
 	test.That(t, args, test.ShouldContain, "--no-isolate-subject")
 	test.That(t, args, test.ShouldNotContain, "--isolate-subject")
+}
+
+func TestConfigValidate_negativeCropMargin(t *testing.T) {
+	below := -1.0
+	_, _, err := (&Config{CropBelow: &below}).Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "crop_below")
+}
+
+func TestBuildCLIArgs_cropOmittedWhenUnset(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{}}
+	args := s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 60, MarginMM: 10})
+	test.That(t, strings.Join(args, " "), test.ShouldNotContainSubstring, "--crop")
+}
+
+func TestBuildCLIArgs_cropFlagsPassedThrough(t *testing.T) {
+	crop, above, below, sides := true, 0.55, 0.1, 1.1
+	s := &strokeGenerator{cfg: &Config{
+		CropFace: &crop, CropAbove: &above, CropBelow: &below, CropSides: &sides,
+	}}
+	joined := strings.Join(s.buildCLIArgs(&generateArgs{
+		PaperWidthMM: 100, PaperHeightMM: 60, MarginMM: 10,
+	}), " ")
+	test.That(t, joined, test.ShouldContainSubstring, "--crop-face")
+	test.That(t, joined, test.ShouldContainSubstring, "--crop-above 0.55")
+	test.That(t, joined, test.ShouldContainSubstring, "--crop-below 0.1")
+	test.That(t, joined, test.ShouldContainSubstring, "--crop-sides 1.1")
+}
+
+func TestBuildCLIArgs_cropFaceDisabledIsExplicit(t *testing.T) {
+	crop := false
+	s := &strokeGenerator{cfg: &Config{CropFace: &crop}}
+	joined := strings.Join(s.buildCLIArgs(&generateArgs{
+		PaperWidthMM: 100, PaperHeightMM: 60, MarginMM: 10,
+	}), " ")
+	test.That(t, joined, test.ShouldContainSubstring, "--no-crop-face")
 }
