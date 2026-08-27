@@ -366,3 +366,45 @@ Then point the drawer at them with `"photo": "photo"` and
 one shows the photo that was taken, the other the line drawing it became.
 
 The countdown lives on the `photo` camera's `delay_sec`, not on the drawer.
+
+## The application
+
+A read-only dashboard is published alongside the module as a Viam application:
+capture feedback, the photo that was taken, the line art generated from it, and
+drawing progress. It is deliberately read-only — the arm is triggered by hand
+gesture, not by a web page.
+
+It lives in `web/` (Svelte + Vite) and is built into `web/dist`, which ships in
+the module tarball; `meta.json` points its `applications` entry at
+`web/dist/index.html` and Viam handles hosting and authentication.
+
+The app connects from the browser straight to the machine, using the machine and
+credentials Viam supplies when a viewer picks one. So it needs the machine
+reachable and the viewer signed in — fine for someone watching a demo on a
+laptop, not for an unattended wall display.
+
+```bash
+cd web && npm ci && npm run dev   # local development
+make web                          # production bundle, as CI and the release build do
+```
+
+For local development against a real machine, create `web/.env.local` (gitignored)
+with a **machine-scoped** API key — the dashboard reads one machine and an
+organization key would be far more authority than the job needs:
+
+```
+VITE_MACHINE_HOST=your-machine.abc123.viam.cloud
+VITE_API_KEY_ID=...
+VITE_API_KEY=...
+```
+
+That fallback is behind `import.meta.env.DEV`, so Vite drops it from a
+production build and the values are never inlined into one. Credentials Viam
+supplies always take precedence.
+
+Each source is polled independently: losing the drawer's status does not blank
+the photo and line art, since a drawer too old to know the `status` verb still
+draws and its cameras still hold frames.
+
+`vite.config.ts` sets `base: './'`. Viam serves the bundle from a sub-path, so
+absolute asset URLs load locally and break once deployed.
