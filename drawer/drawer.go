@@ -25,6 +25,7 @@ import (
 	"go.viam.com/rdk/robot/framesystem"
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/spatialmath"
+	rutils "go.viam.com/rdk/utils"
 
 	"github.com/viam-labs/portrait-drawing/internal/verb"
 )
@@ -512,7 +513,7 @@ func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[str
 	}
 	defer release()
 
-	polylines, err := d.generateStrokes(ctx, a.ImageB64, &a.strokeArgs)
+	polylines, err := d.generateStrokes(ctx, a.ImageB64, "", &a.strokeArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -553,11 +554,11 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 		d.logger.Info("drawer: recapture is false; drawing the frame the photo camera already holds")
 	}
 
-	imageB64, err := d.readPhoto(ctx)
+	imageB64, depthB64, err := d.readPhoto(ctx)
 	if err != nil {
 		return nil, err
 	}
-	polylines, err := d.generateStrokes(ctx, imageB64, &a.strokeArgs)
+	polylines, err := d.generateStrokes(ctx, imageB64, depthB64, &a.strokeArgs)
 	if err != nil {
 		return nil, err
 	}
@@ -573,23 +574,40 @@ func (d *drawer) triggerPhoto(ctx context.Context) error {
 	return nil
 }
 
-// readPhoto returns whatever frame the photo camera currently holds.
-func (d *drawer) readPhoto(ctx context.Context) (string, error) {
+// readPhoto returns whatever frames the photo camera currently holds: the
+// picture, and a depth map beside it when the camera has one. Depth is optional
+// — it improves background removal but nothing requires it.
+func (d *drawer) readPhoto(ctx context.Context) (imageB64, depthB64 string, err error) {
 	images, _, err := d.photo.Images(ctx, nil, nil)
 	if err != nil {
-		return "", fmt.Errorf("drawer: read photo %q: %w", d.cfg.Photo, err)
+		return "", "", fmt.Errorf("drawer: read photo %q: %w", d.cfg.Photo, err)
 	}
 	if len(images) == 0 {
-		return "", fmt.Errorf("drawer: photo %q returned no images", d.cfg.Photo)
+		return "", "", fmt.Errorf("drawer: photo %q returned no images", d.cfg.Photo)
 	}
-	raw, err := images[0].Bytes(ctx)
-	if err != nil {
-		return "", fmt.Errorf("drawer: read photo bytes: %w", err)
+	for i := range images {
+		raw, bytesErr := images[i].Bytes(ctx)
+		if bytesErr != nil {
+			return "", "", fmt.Errorf("drawer: read photo bytes: %w", bytesErr)
+		}
+		encoded := base64.StdEncoding.EncodeToString(raw)
+		if images[i].MimeType() == rutils.MimeTypeRawDepth {
+			depthB64 = encoded
+			continue
+		}
+		if imageB64 == "" {
+			imageB64 = encoded
+		}
 	}
-	return base64.StdEncoding.EncodeToString(raw), nil
+	if imageB64 == "" {
+		return "", "", fmt.Errorf("drawer: photo %q returned only depth, no picture", d.cfg.Photo)
+	}
+	return imageB64, depthB64, nil
 }
 
-func (d *drawer) generateStrokes(ctx context.Context, imageB64 string, a *strokeArgs) ([]Polyline, error) {
+func (d *drawer) generateStrokes(
+	ctx context.Context, imageB64, depthB64 string, a *strokeArgs,
+) ([]Polyline, error) {
 	inner := map[string]interface{}{
 		"image_b64":       imageB64,
 		"paper_width_mm":  d.cfg.PaperWidthMM,
@@ -597,6 +615,9 @@ func (d *drawer) generateStrokes(ctx context.Context, imageB64 string, a *stroke
 		"margin_mm":       a.MarginMM,
 		"rotate":          a.Rotate,
 		"mirror":          a.Mirror,
+	}
+	if depthB64 != "" {
+		inner["depth_b64"] = depthB64
 	}
 	if a.AutoRotate != nil {
 		inner["auto_rotate"] = *a.AutoRotate

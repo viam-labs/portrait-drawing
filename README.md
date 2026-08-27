@@ -213,8 +213,20 @@ telling you to cancel the first.
 
 ## `viam:portrait-drawing:stroke-generator`
 
-Turns an image into polylines. It holds no state and has no dependencies, so it
+Turns a photo into polylines. It holds no state and has no dependencies, so it
 is safe to call directly while tuning.
+
+Strokes come from a small neural line-drawing model
+([informative-drawings](https://carolineec.github.io/informative_drawings/),
+CVPR 2022, MIT) rather than from edge detection. That is not a preference for
+neural methods; edge detectors can only trace contrast that physically exists,
+so on a face they either fragment into texture where contrast is weak or follow
+shadow boundaries where it is strong. The model completes a line through a
+low-contrast stretch because it has learned that faces have lines there.
+
+`first_run.sh` downloads the model. Unlike the face detector there is no
+fallback: it is the extraction stage itself, so a missing model is an error
+rather than degraded output.
 
 ### Configuration
 
@@ -222,64 +234,78 @@ Every attribute is optional; the defaults are tuned for portraits.
 
 | Attribute | Type | Description |
 |---|---|---|
-| `detail` | number | Overall line density. Higher means more lines. |
-| `face_detail` | number | Extra density inside a detected face, so features survive when the background is simplified. |
-| `face_size_px` | int | Size the detected face is normalised to before detail is applied. |
-| `isolate_subject` | bool | Drop the background and keep the person. Defaults to true. |
-| `crop_face` | bool | Crop to the subject before tracing. Defaults to false. See [Framing](#framing). |
+| `size` | int | Long side, in pixels, the model sees. Larger recovers finer features — lashes, nostrils — at a roughly linear cost in strokes. Default `768`. |
+| `clahe` | number | Local contrast lift before the model runs. Default `2.0`; `0` disables. |
+| `sigma` | number | Smoothing of the model response before ridges are traced. Default `2.2`. |
+| `low`, `high` | number | Hysteresis bounds on ridge strength. Default `4` and `12`. |
+| `prune` | int | Spur pruning iterations. Default `20`. |
+| `min_len` | int | Shortest stroke kept. Default `36`. |
+| `smooth`, `min_dist` | number | Curve simplification and minimum spacing between retained points. |
+| `isolate_subject` | bool | Remove the background. Default true. |
+| `max_depth_mm`, `min_depth_mm` | number | Depth band for background removal, used only when a depth frame is supplied. Default `1500` and `0`. |
+| `crop_face` | bool | Crop to the subject before tracing. Default false. See [Framing](#framing). |
 | `crop_above`, `crop_below`, `crop_sides` | number | Crop margins in multiples of the detected face box. Default `1.2`, `2.0`, `1.5`. |
-| `region`, `low`, `high` | int | Adaptive-threshold region and Canny hysteresis bounds. |
-| `merge`, `prune`, `min_len` | int | Contour merging distance, spur pruning length, and the shortest polyline kept. |
-| `smooth`, `min_dist` | number | Curve smoothing and the minimum spacing between retained points. |
 
-Face-aware detail needs the YuNet face model on the machine; without it the
-pipeline still runs with uniform detail.
+### Why hysteresis rather than a threshold
 
-### Framing
+The model draws facial features more faintly than hair and silhouette. A single
+threshold either loses the features or admits noise everywhere else — there is
+no value that does both. So strokes are traced as ridges in the model's
+greyscale response, and kept by *connection*: any ridge above `low` that reaches
+one above `high` survives. A faint lip contour is kept because it joins a strong
+jawline, which no per-pixel threshold can express.
 
-The pipeline normalises resolution by face size and detail by edge density, but
-not composition. A photo taken from across a room spends most of the paper on
-torso, chair and room; the face ends up a fifth of the drawing, and at that size
-its features do not survive tracing. Detail settings cannot recover this — there
-is nothing wrong with the thresholds, the face is simply too small.
+Tracing ridges directly also means the centreline is found rather than
+reconstructed. Binarising and thinning slices through a soft stroke's shoulders
+and leaves a dashed line that has to be closed back up, which merges neighbouring
+strokes into blobs.
 
-`crop_face` crops to the subject first, in multiples of the detected face box,
-so framing stays consistent however far away the subject sits:
+### Background removal
+
+Two strategies, and depth wins when it is available.
+
+`isolate_subject` alone segments on colour with GrabCut, which cannot separate
+dark hair from dark clutter behind it — they are the same colour, so it merges
+them into one foreground blob and keeps the lot.
+
+Supply `depth_b64` and the subject is segmented by **distance** instead, which
+is indifferent to that. A [frame-buffer](https://github.com/viam-labs/frame-buffer)
+camera in front of a depth camera latches colour and depth together, and the
+drawer passes both through.
 
 ```json
-{
-  "crop_face": true,
-  "crop_above": 0.55,
-  "crop_below": 0.1,
-  "crop_sides": 1.1
-}
+{ "max_depth_mm": 1500, "min_depth_mm": 350 }
 ```
 
-Those values give a head-and-shoulders portrait. `crop_below` is usually the one
-worth tuning: it decides how much of the body — and anything on the desk in
-front of the subject — comes along.
+The near bound matters as much as the far one on an arm-mounted camera: the pen
+and its holder sit a few hundred millimetres from the lens, well in front of any
+sitter, and are drawn into every portrait otherwise. Both bounds are fixed
+properties of the rig, so they are set once and left alone.
 
-If no face is detected the image is left uncropped, so a missed detection costs
-framing rather than the whole drawing.
-
-Cropping changes the image's aspect ratio, which changes what `auto_rotate`
-chooses. If the paper's orientation is fixed by how the arm is mounted, set
-`auto_rotate: false` and an explicit `rotate` rather than letting it swing on
-the crop shape.
+Pixels with no depth reading are excluded rather than treated as near — a
+dropout is unknown, not close.
 
 ### `generate`
 
 ```json
 {"generate": {
   "image_b64": "/9j/4AAQ…",
+  "depth_b64": "REVQVEhNQVA…",
   "paper_width_mm": 215.9,
   "paper_height_mm": 279.4,
   "margin_mm": 40
 }}
 ```
 
-Returns `{"polylines": [[[x, y], …], …]}` in paper-local mm — exactly the shape
-the drawer's `draw` verb accepts.
+`depth_b64` is an optional Viam `DEPTHMAP` frame aligned to the photo. Returns
+`{"polylines": [[[x, y], …], …]}` in paper-local mm — exactly the shape the
+drawer's `draw` verb accepts.
+
+## Credits
+
+The line-drawing model is from
+[Learning to Generate Line Drawings that Convey Geometry and Semantics](https://carolineec.github.io/informative_drawings/)
+(Chan, Durand, Isola — CVPR 2022), used under the MIT licence.
 
 ## Setting up the capture loop
 

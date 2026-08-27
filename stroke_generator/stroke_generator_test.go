@@ -24,43 +24,6 @@ func TestConfigValidate_negativeSmooth(t *testing.T) {
 
 func ptr[T any](v T) *T { return &v }
 
-func TestConfigValidate_negativeDetail(t *testing.T) {
-	cfg := &Config{Detail: ptr(-1.0)}
-	_, _, err := cfg.Validate("")
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "detail")
-}
-
-func TestConfigValidate_negativeFaceDetail(t *testing.T) {
-	cfg := &Config{FaceDetail: ptr(-1.0)}
-	_, _, err := cfg.Validate("")
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "face_detail")
-}
-
-func TestConfigValidate_zeroDetailAllowed(t *testing.T) {
-	// 0 is a meaningful value (use fixed low/high) and must pass validation.
-	cfg := &Config{Detail: ptr(0.0), FaceDetail: ptr(0.0)}
-	_, _, err := cfg.Validate("")
-	test.That(t, err, test.ShouldBeNil)
-}
-
-func TestConfigValidate_lowOutOfRange(t *testing.T) {
-	cfg := &Config{Low: 300}
-	_, _, err := cfg.Validate("")
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "low")
-}
-
-func TestConfigValidate_validFullConfig(t *testing.T) {
-	cfg := &Config{
-		Region: 30, Low: 50, High: 150, Merge: 3, Prune: 20,
-		MinLen: 100, Smooth: 2.0, MinDist: 10.0,
-	}
-	_, _, err := cfg.Validate("")
-	test.That(t, err, test.ShouldBeNil)
-}
-
 func TestParseGenerateArgs_valid(t *testing.T) {
 	payload := map[string]interface{}{
 		"image_b64":       base64.StdEncoding.EncodeToString([]byte("fake image")),
@@ -143,38 +106,19 @@ func argValue(args []string, flag string) string {
 	return ""
 }
 
-func TestBuildCLIArgs_omitsUnsetFaceKnobs(t *testing.T) {
-	// Unset (nil) face-aware knobs must NOT be passed, so the Python pipeline
-	// applies its own defaults (the single source of truth for tuned values).
+func TestBuildCLIArgs_passesSetKnobs(t *testing.T) {
 	s := &strokeGenerator{cfg: &Config{
-		Region: defaultRegion, Low: defaultLow, High: defaultHigh,
-		Merge: defaultMerge, Prune: defaultPrune, MinLen: defaultMinLen,
-		Smooth: defaultSmooth, MinDist: defaultMinDist,
+		Size: ptr(896), Clahe: ptr(2.5), Sigma: ptr(1.8),
+		Low: ptr(3.0), High: ptr(10.0), IsolateSubject: ptr(true),
 	}}
 	args := s.buildCLIArgs(&generateArgs{
-		PaperWidthMM: 215.9, PaperHeightMM: 279.4, MarginMM: 40.0, Rotate: 0, Mirror: false,
+		PaperWidthMM: 100, PaperHeightMM: 100, MarginMM: 10,
 	})
-	test.That(t, argValue(args, "--paper-width-mm"), test.ShouldEqual, "215.9")
-	test.That(t, argValue(args, "--region"), test.ShouldEqual, "10")
-	test.That(t, args, test.ShouldNotContain, "--detail")
-	test.That(t, args, test.ShouldNotContain, "--face-detail")
-	test.That(t, args, test.ShouldNotContain, "--face-size-px")
-	test.That(t, args, test.ShouldNotContain, "--isolate-subject")
-	test.That(t, args, test.ShouldNotContain, "--no-isolate-subject")
-	test.That(t, args, test.ShouldNotContain, "--mirror")
-}
-
-func TestBuildCLIArgs_passesSetFaceKnobs(t *testing.T) {
-	s := &strokeGenerator{cfg: &Config{
-		Detail: ptr(2.0), FaceDetail: ptr(0.0), FaceSizePx: ptr(400),
-		IsolateSubject: ptr(true),
-	}}
-	args := s.buildCLIArgs(&generateArgs{
-		PaperWidthMM: 100, PaperHeightMM: 100, MarginMM: 10, Rotate: 0, Mirror: false,
-	})
-	test.That(t, argValue(args, "--detail"), test.ShouldEqual, "2")
-	test.That(t, argValue(args, "--face-detail"), test.ShouldEqual, "0")
-	test.That(t, argValue(args, "--face-size-px"), test.ShouldEqual, "400")
+	test.That(t, argValue(args, "--size"), test.ShouldEqual, "896")
+	test.That(t, argValue(args, "--clahe"), test.ShouldEqual, "2.5")
+	test.That(t, argValue(args, "--sigma"), test.ShouldEqual, "1.8")
+	test.That(t, argValue(args, "--low"), test.ShouldEqual, "3")
+	test.That(t, argValue(args, "--high"), test.ShouldEqual, "10")
 	test.That(t, args, test.ShouldContain, "--isolate-subject")
 }
 
@@ -230,4 +174,83 @@ func TestBuildCLIArgs_cropFaceDisabledIsExplicit(t *testing.T) {
 		PaperWidthMM: 100, PaperHeightMM: 60, MarginMM: 10,
 	}), " ")
 	test.That(t, joined, test.ShouldContainSubstring, "--no-crop-face")
+}
+
+func TestConfigValidate_validFullConfig(t *testing.T) {
+	cfg := &Config{
+		Size: ptr(768), Clahe: ptr(2.0), Sigma: ptr(2.2),
+		Low: ptr(4.0), High: ptr(12.0),
+		MaxDepthMM: ptr(1500.0), MinDepthMM: ptr(350.0),
+		Prune: 20, MinLen: 36, Smooth: 2.0, MinDist: 3.0,
+	}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+}
+
+func TestConfigValidate_hysteresisOrder(t *testing.T) {
+	_, _, err := (&Config{Low: ptr(20.0), High: ptr(5.0)}).Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "must not exceed high")
+}
+
+func TestConfigValidate_depthBandOrder(t *testing.T) {
+	_, _, err := (&Config{MinDepthMM: ptr(2000.0), MaxDepthMM: ptr(1500.0)}).Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "min_depth_mm")
+}
+
+func TestConfigValidate_sizeTooSmall(t *testing.T) {
+	_, _, err := (&Config{Size: ptr(32)}).Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "size")
+}
+
+func TestBuildCLIArgs_omitsUnsetKnobs(t *testing.T) {
+	// Unset (nil) knobs must NOT be passed, so the Python pipeline applies its
+	// own defaults — the single source of truth for the tuned values.
+	s := &strokeGenerator{cfg: &Config{
+		Prune: defaultPrune, MinLen: defaultMinLen,
+		Smooth: defaultSmooth, MinDist: defaultMinDist,
+	}}
+	args := s.buildCLIArgs(&generateArgs{
+		PaperWidthMM: 215.9, PaperHeightMM: 279.4, MarginMM: 40.0,
+	})
+	joined := strings.Join(args, " ")
+	test.That(t, argValue(args, "--paper-width-mm"), test.ShouldEqual, "215.9")
+	for _, flag := range []string{
+		"--size", "--clahe", "--sigma", "--low", "--high",
+		"--max-depth-mm", "--min-depth-mm", "--crop-face", "--isolate-subject",
+	} {
+		test.That(t, joined, test.ShouldNotContainSubstring, flag)
+	}
+}
+
+func TestBuildCLIArgs_depthBoundsPassedThrough(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{MaxDepthMM: ptr(1500.0), MinDepthMM: ptr(350.0)}}
+	joined := strings.Join(s.buildCLIArgs(&generateArgs{
+		PaperWidthMM: 215.9, PaperHeightMM: 279.4, MarginMM: 40.0,
+	}), " ")
+	test.That(t, joined, test.ShouldContainSubstring, "--max-depth-mm 1500")
+	test.That(t, joined, test.ShouldContainSubstring, "--min-depth-mm 350")
+}
+
+func TestParseGenerateArgs_depthIsOptional(t *testing.T) {
+	got, err := parseGenerateArgs(map[string]interface{}{
+		"image_b64":       base64.StdEncoding.EncodeToString([]byte("img")),
+		"paper_width_mm":  215.9,
+		"paper_height_mm": 279.4,
+	})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.DepthB64, test.ShouldBeEmpty)
+}
+
+func TestParseGenerateArgs_depthCarried(t *testing.T) {
+	got, err := parseGenerateArgs(map[string]interface{}{
+		"image_b64":       base64.StdEncoding.EncodeToString([]byte("img")),
+		"depth_b64":       base64.StdEncoding.EncodeToString([]byte("DEPTHMAP...")),
+		"paper_width_mm":  215.9,
+		"paper_height_mm": 279.4,
+	})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.DepthB64, test.ShouldNotBeEmpty)
 }
