@@ -18,7 +18,19 @@
       "markdown_link": "README.md"
     }
   ],
-  "applications": null,
+  "applications": [
+    {
+      "name": "portrait-drawing",
+      "type": "single_machine",
+      "entrypoint": "web/dist/index.html",
+      "customizations": {
+        "machinePicker": {
+          "heading": "Portrait Drawing",
+          "subheading": "Pick the machine with the drawing arm"
+        }
+      }
+    }
+  ],
   "markdown_link": "README.md",
   "entrypoint": "bin/portrait-drawing",
   "first_run": "first_run.sh",
