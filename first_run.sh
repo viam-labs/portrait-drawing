@@ -21,6 +21,16 @@ UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
 # YuNet face-detection model for the stroke-generator (fetched here rather
 # than committed). The pipeline falls back to non-face-aware behaviour if
 # this download fails.
+# Line-drawing model (informative-drawings). Unlike YuNet there is no fallback:
+# it is the extraction stage, so a failure here must be loud.
+LINEART="models/lineart.onnx"
+if [ ! -f "$LINEART" ]; then
+    mkdir -p models
+    curl -fsSL \
+        "https://huggingface.co/rocca/informative-drawings-line-art-onnx/resolve/main/model.onnx" \
+        -o "$LINEART"
+fi
+
 YUNET="models/face_detection_yunet_2023mar.onnx"
 if [ ! -f "$YUNET" ]; then
     mkdir -p models

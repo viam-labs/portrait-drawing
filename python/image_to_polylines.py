@@ -35,6 +35,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 
 # 8-connected neighbour kernel, reused by spur pruning.
 _NEIGHBOURS = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], np.float32)
@@ -45,27 +46,10 @@ _YUNET_PATH = Path(__file__).resolve().parent.parent / "models" / \
 _MAX_WORK_PX = 1600
 _face_detector = None
 
-
-def region_edges(gray: np.ndarray, close_k: int) -> np.ndarray:
-    """Edge map of the dark-vs-light tone regions (hair silhouette, hairline).
-
-    Otsu thresholds skin vs hair, consolidates the dark mass into a solid blob
-    (close), removes small specks (open), then traces the boundary — a clean
-    continuous silhouette line that gradient edge detection would miss.
-    """
-    blurred = cv2.GaussianBlur(gray, (9, 9), 0)
-    _, mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    close_k = max(3, close_k | 1)
-    mask = cv2.morphologyEx(
-        mask, cv2.MORPH_CLOSE,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k)),
-    )
-    open_k = max(3, (close_k // 3) | 1)
-    mask = cv2.morphologyEx(
-        mask, cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k)),
-    )
-    return cv2.Canny(mask, 50, 150)
+# Line-drawing model (informative-drawings, CVPR 2022). first_run.sh fetches it;
+# unlike YuNet there is no fallback, since it is the extraction stage itself.
+_MODEL_PATH = Path(__file__).resolve().parent.parent / "models" / "lineart.onnx"
+_session = None
 
 
 def prune_spurs(skel: np.ndarray, iters: int) -> np.ndarray:
@@ -100,28 +84,6 @@ def decimate_vertices(cnt: np.ndarray, min_dist: float) -> np.ndarray:
             kept.append(p)
     kept.append(pts[-1])
     return np.array(kept, dtype=np.int32).reshape(-1, 1, 2)
-
-
-def auto_canny_thresholds(filtered: np.ndarray, target_frac: float,
-                          roi: np.ndarray = None,
-                          ratio: float = 0.4) -> tuple[int, int]:
-    """Pick Canny thresholds so ~`target_frac` of pixels become edges.
-
-    Binary-searches the high threshold (low = ratio * high) so detail is
-    consistent across bright/dark photos; `roi` restricts where density is
-    measured.
-    """
-    lo_h, hi_h = 10.0, 300.0
-    for _ in range(18):
-        h = (lo_h + hi_h) / 2
-        edges = cv2.Canny(filtered, int(ratio * h), int(h)) > 0
-        frac = edges[roi].mean() if roi is not None else edges.mean()
-        if frac > target_frac:
-            lo_h = h
-        else:
-            hi_h = h
-    h = (lo_h + hi_h) / 2
-    return int(ratio * h), int(h)
 
 
 def detect_face(img: np.ndarray) -> tuple:
@@ -198,96 +160,186 @@ def subject_mask(img: np.ndarray, face: tuple = None) -> np.ndarray:
     return cv2.resize(fg, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
-def analyze_image(img: np.ndarray, isolate_subject: bool, face_detail: float,
-                  face_size_px: int) -> tuple:
-    """Grayscale the image; normalise resolution, optionally remove background.
+def crop_to_face(
+    img: np.ndarray, above: float, below: float, sides: float,
+) -> np.ndarray:
+    """Crop to the subject, measured in multiples of the detected face box.
 
-    Scales so the detected face is ~`face_size_px` wide (detail params are in
-    pixels, so this keeps detail consistent across resolutions). Returns
-    (gray, roi, face): the subject mask and head-region mask, each a boolean
-    array or None.
+    The pipeline normalises resolution by face size and detail by edge density,
+    but not composition. A photo taken from across a room spends most of the
+    paper on torso and room, leaving the face too small for its features to
+    survive the tracing. Cropping in face units keeps the framing consistent
+    however far away the subject sits.
+
+    Returns the image unchanged when no face is found, so a missed detection
+    costs framing rather than the whole drawing.
     """
-    box = detect_face(img) if (face_detail > 0 or isolate_subject) else None
+    box = detect_face(img)
+    if box is None:
+        return img
+    fx, fy, fw, fh = box
+    cx = fx + fw / 2
+    h, w = img.shape[:2]
+    x0, x1 = max(0, int(cx - sides * fw)), min(w, int(cx + sides * fw))
+    y0, y1 = max(0, int(fy - above * fh)), min(h, int(fy + fh + below * fh))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return img
+    return img[y0:y1, x0:x1]
 
+
+def isolate(img: np.ndarray, isolate_subject: bool, head_span: float = 2.4) -> tuple:
+    """Return (image, subject mask or None).
+
+    The line model draws whatever is in frame, so without a mask the arm spends
+    its minutes on the room. GrabCut alone is not enough for a portrait: dark
+    hair against dark clutter merges into one foreground blob, and the largest
+    connected component then includes a chair rack. Bounding it to an ellipse
+    around the head cuts that off — safe here because the crop is a head-and-
+    shoulders portrait, so nothing worth drawing lies outside it.
+    """
+    if not isolate_subject:
+        return img, None
+    box = detect_face(img)
+    mask = subject_mask(img, face=box) > 0
     if box is not None:
-        scale = face_size_px / box[2]
-    else:
-        scale = min(1.0, _MAX_WORK_PX / max(img.shape[:2]))
-    scale = float(np.clip(scale, 0.2, 3.0))
-    if abs(scale - 1.0) > 0.05:
-        interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
-        img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=interp)
-        if box is not None:
-            box = tuple(v * scale for v in box)
+        fx, fy, fw, fh = box
+        bound = np.zeros(mask.shape, np.uint8)
+        cv2.ellipse(bound,
+                    (int(fx + fw / 2), int(fy + fh / 2 - 0.12 * fh)),
+                    (int(head_span * fw), int(head_span * fh)),
+                    0, 0, 360, 255, -1)
+        mask &= bound > 0
+    return img, mask
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    roi = None
-    if isolate_subject:
-        mask = subject_mask(img, face=box)
-        gray = gray.copy()
-        gray[mask == 0] = 255
-        roi = mask > 0
-    face = head_ellipse(box, gray.shape) if (face_detail > 0 and box) else None
-    if face is not None and roi is not None:
-        face = face & roi
-    return gray, roi, face
+
+def enhance(img: np.ndarray, clahe_clip: float) -> np.ndarray:
+    """Lift local contrast before the model sees it.
+
+    The model draws what it can distinguish. A face lit from above, or simply
+    underexposed because the camera metered for a bright window, produces a weak
+    response around the mouth and nose while the hair and silhouette come out
+    strong. CLAHE equalises that locally, so faint features are lifted relative
+    to their own neighbourhood; a global gamma would lift the whole face and
+    flatten the very gradients worth keeping.
+    """
+    if clahe_clip <= 0:
+        return img
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    channel_l, channel_a, channel_b = cv2.split(lab)
+    channel_l = cv2.createCLAHE(clipLimit=clahe_clip, tileGridSize=(8, 8)).apply(channel_l)
+    return cv2.cvtColor(cv2.merge([channel_l, channel_a, channel_b]), cv2.COLOR_LAB2BGR)
+
+
+def line_response(img: np.ndarray, size: int) -> np.ndarray:
+    """Run the line-drawing model and return its greyscale response.
+
+    The model takes dynamic height and width, so the image goes in at its own
+    aspect ratio. Squashing it to a square makes the model draw a stretched
+    face; letterboxing spends resolution on padding, which shrinks the face and
+    costs the finest features first.
+    """
+    if not _MODEL_PATH.exists():
+        raise RuntimeError(
+            f"line-art model missing at {_MODEL_PATH}; first_run.sh downloads it")
+    global _session
+    if _session is None:
+        _session = ort.InferenceSession(str(_MODEL_PATH), providers=["CPUExecutionProvider"])
+    height, width = img.shape[:2]
+    scale = size / max(height, width)
+    new_w = max(8, int(round(width * scale / 8)) * 8)
+    new_h = max(8, int(round(height * scale / 8)) * 8)
+    interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC
+    resized = cv2.resize(img, (new_w, new_h), interpolation=interp)
+    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    out = _session.run(None, {_session.get_inputs()[0].name: rgb.transpose(2, 0, 1)[None]})[0]
+    line = np.squeeze(out)
+    if line.ndim == 3:
+        line = line.mean(axis=0)
+    return (np.clip(line, 0, 1) * 255).astype(np.uint8)
+
+
+def ridge_centerlines(response: np.ndarray, sigma: float, low: float, high: float) -> np.ndarray:
+    """Trace stroke centrelines out of the model's greyscale response.
+
+    Binarising first is lossy twice over: it discards the intensity that says
+    how confident the model was, and it decides per pixel, so a faint feature is
+    dropped even when it plainly continues a stroke that is strong elsewhere.
+    Raising the threshold to keep features then admits noise everywhere else.
+
+    Instead: a stroke is a ridge, so the smaller Hessian eigenvalue is strongly
+    negative across it. Suppressing non-maxima in that direction yields a
+    one-pixel centreline without binarising and without thinning having to guess
+    it back. Hysteresis then keeps every ridge pixel above `low` that connects
+    to one above `high`, so faint features survive by attachment rather than by
+    their own amplitude.
+    """
+    bright = (255 - response).astype(np.float32)
+    blurred = cv2.GaussianBlur(bright, (0, 0), sigma)
+    ixx = cv2.Sobel(blurred, cv2.CV_32F, 2, 0, ksize=3)
+    iyy = cv2.Sobel(blurred, cv2.CV_32F, 0, 2, ksize=3)
+    ixy = cv2.Sobel(blurred, cv2.CV_32F, 1, 1, ksize=3)
+    spread = np.sqrt((ixx - iyy) ** 2 + 4.0 * ixy ** 2)
+    smaller = 0.5 * (ixx + iyy - spread)
+    strength = np.maximum(0.0, -smaller)
+
+    vec_x, vec_y = ixy, smaller - ixx
+    norm = np.hypot(vec_x, vec_y) + 1e-6
+    angle = (np.degrees(np.arctan2(vec_y / norm, vec_x / norm)) + 180.0) % 180.0
+    sector = np.zeros(angle.shape, np.int32)
+    sector[(angle >= 22.5) & (angle < 67.5)] = 1
+    sector[(angle >= 67.5) & (angle < 112.5)] = 2
+    sector[(angle >= 112.5) & (angle < 157.5)] = 3
+
+    keep = np.ones(strength.shape, bool)
+    for index, (dx, dy) in {0: (1, 0), 1: (1, 1), 2: (0, 1), 3: (-1, 1)}.items():
+        forward = np.roll(np.roll(strength, -dy, axis=0), -dx, axis=1)
+        backward = np.roll(np.roll(strength, dy, axis=0), dx, axis=1)
+        here = sector == index
+        keep &= ~(here & ((strength < forward) | (strength < backward)))
+    ridge = np.where(keep, strength, 0.0)
+    ridge[0, :] = ridge[-1, :] = ridge[:, 0] = ridge[:, -1] = 0
+
+    weak = (ridge >= low).astype(np.uint8)
+    count, labels = cv2.connectedComponents(weak, connectivity=8)
+    if count <= 1:
+        return np.zeros_like(weak)
+    connected = np.zeros(count, bool)
+    connected[np.unique(labels[ridge >= high])] = True
+    connected[0] = False
+    return (connected[labels] * 255).astype(np.uint8)
 
 
 def extract_polylines(
-    gray: np.ndarray,
-    detail: float,
-    region: int,
-    low: int,
-    high: int,
-    merge: int,
+    img: np.ndarray,
+    size: int,
+    clahe_clip: float,
+    sigma: float,
+    low: float,
+    high: float,
     prune: int,
     min_len: int,
     smooth: float,
     min_dist: float,
     roi: np.ndarray = None,
-    face: np.ndarray = None,
-    face_detail: float = 0.0,
 ) -> list[np.ndarray]:
-    """Extract clean single-stroke polylines from a grayscale image.
-
-    Thresholds are auto-tuned to a `detail` density (0 uses fixed low/high).
-    A `face` mask is traced at the higher `face_detail`, and the tone-region
-    outline is dropped over the lower face (kept across the top for the
-    hairline) so the features stay clean contour lines.
-    """
-    filtered = cv2.bilateralFilter(gray, d=9, sigmaColor=75, sigmaSpace=75)
-    if detail > 0:
-        low, high = auto_canny_thresholds(filtered, detail / 100.0, roi=roi)
-    edges = cv2.Canny(filtered, low, high)
-
-    if face is not None and face.any() and face_detail > 0:
-        f_low, f_high = auto_canny_thresholds(filtered, face_detail / 100.0, roi=face)
-        edges = np.where(face, cv2.Canny(filtered, f_low, f_high), edges).astype(np.uint8)
-
-    if region > 0:
-        reg = region_edges(gray, region)
-        if face is not None and face.any() and face_detail > 0:
-            rows = np.where(face.any(axis=1))[0]
-            cutoff = rows.min() + int(0.4 * (rows.max() - rows.min()))
-            lower_face = face.copy()
-            lower_face[:cutoff, :] = False
-            reg[lower_face] = 0
-        edges = cv2.max(edges, reg)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (max(1, merge),) * 2)
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-    edges = cv2.ximgproc.thinning(edges, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN)
+    """Turn a photo into clean single-stroke polylines."""
+    response = line_response(enhance(img, clahe_clip), size)
+    edges = ridge_centerlines(response, sigma, low, high)
+    # The model paints a border along the image edge; it belongs to no one.
+    edges[:3, :] = edges[-3:, :] = edges[:, :3] = edges[:, -3:] = 0
+    if roi is not None:
+        mask = cv2.resize(roi.astype(np.uint8), (edges.shape[1], edges.shape[0]),
+                          interpolation=cv2.INTER_NEAREST)
+        edges[cv2.dilate(mask, np.ones((9, 9), np.uint8)) == 0] = 0
     edges = prune_spurs(edges, prune)
 
     contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
     polylines = []
     for cnt in contours:
         if cv2.arcLength(cnt, closed=False) < min_len:
             continue
         cnt = cv2.approxPolyDP(cnt, smooth, closed=False)
-        cnt = decimate_vertices(cnt, min_dist)
-        polylines.append(cnt)
+        polylines.append(decimate_vertices(cnt, min_dist))
     return polylines
 
 
@@ -358,33 +410,37 @@ def image_bytes_to_polylines(
     margin_mm: float,
     rotate: int,
     mirror: bool,
-    region: int,
-    low: int,
-    high: int,
-    merge: int,
     prune: int,
     min_len: int,
     smooth: float,
     min_dist: float,
-    detail: float = 1.0,
-    face_detail: float = 6.0,
+    size: int = 768,
+    clahe: float = 2.0,
+    sigma: float = 2.2,
+    low: float = 4.0,
+    high: float = 12.0,
     isolate_subject: bool = True,
-    face_size_px: int = 520,
+    head_span: float = 2.4,
     auto_rotate: bool = True,
+    crop_face: bool = False,
+    crop_above: float = 1.2,
+    crop_below: float = 2.0,
+    crop_sides: float = 1.5,
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("could not decode image bytes")
-    gray, roi, face = analyze_image(img, isolate_subject, face_detail, face_size_px)
+    if crop_face:
+        img = crop_to_face(img, crop_above, crop_below, crop_sides)
+    img, roi = isolate(img, isolate_subject, head_span)
     if auto_rotate:
-        img_h, img_w = gray.shape
+        img_h, img_w = img.shape[:2]
         rotate = _rotation_for_paper(img_w, img_h, paper_width_mm, paper_height_mm)
     polylines = extract_polylines(
-        gray, detail=detail, region=region, low=low, high=high, merge=merge,
-        prune=prune, min_len=min_len, smooth=smooth, min_dist=min_dist,
-        roi=roi, face=face, face_detail=face_detail,
+        img, size=size, clahe_clip=clahe, sigma=sigma, low=low, high=high,
+        prune=prune, min_len=min_len, smooth=smooth, min_dist=min_dist, roi=roi,
     )
     return polylines_to_mm(
         polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror,
@@ -399,18 +455,21 @@ def main() -> int:
     p.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270])
     p.add_argument("--auto-rotate", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--mirror", action="store_true")
-    p.add_argument("--detail", type=float, default=1.0)
-    p.add_argument("--face-detail", type=float, default=6.0)
-    p.add_argument("--face-size-px", type=int, default=520)
+    p.add_argument("--size", type=int, default=768)
+    p.add_argument("--clahe", type=float, default=2.0)
+    p.add_argument("--sigma", type=float, default=2.2)
     p.add_argument("--isolate-subject", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--region", type=int, default=10)
-    p.add_argument("--low", type=int, default=50)
-    p.add_argument("--high", type=int, default=120)
-    p.add_argument("--merge", type=int, default=3)
-    p.add_argument("--prune", type=int, default=25)
-    p.add_argument("--min-len", type=int, default=40)
-    p.add_argument("--smooth", type=float, default=2.5)
-    p.add_argument("--min-dist", type=float, default=5.0)
+    p.add_argument("--head-span", type=float, default=2.4)
+    p.add_argument("--crop-face", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--crop-above", type=float, default=1.2)
+    p.add_argument("--crop-below", type=float, default=2.0)
+    p.add_argument("--crop-sides", type=float, default=1.5)
+    p.add_argument("--low", type=float, default=4.0)
+    p.add_argument("--high", type=float, default=12.0)
+    p.add_argument("--prune", type=int, default=20)
+    p.add_argument("--min-len", type=int, default=36)
+    p.add_argument("--smooth", type=float, default=2.0)
+    p.add_argument("--min-dist", type=float, default=3.0)
     args = p.parse_args()
 
     image_bytes = sys.stdin.buffer.read()
@@ -426,18 +485,21 @@ def main() -> int:
             margin_mm=args.margin_mm,
             rotate=args.rotate,
             mirror=args.mirror,
-            region=args.region,
+            size=args.size,
+            clahe=args.clahe,
+            sigma=args.sigma,
             low=args.low,
             high=args.high,
-            merge=args.merge,
             prune=args.prune,
             min_len=args.min_len,
             smooth=args.smooth,
             min_dist=args.min_dist,
-            detail=args.detail,
-            face_detail=args.face_detail,
             isolate_subject=args.isolate_subject,
-            face_size_px=args.face_size_px,
+            head_span=args.head_span,
+            crop_face=args.crop_face,
+            crop_above=args.crop_above,
+            crop_below=args.crop_below,
+            crop_sides=args.crop_sides,
             auto_rotate=args.auto_rotate,
         )
     except Exception as e:
