@@ -198,6 +198,33 @@ def subject_mask(img: np.ndarray, face: tuple = None) -> np.ndarray:
     return cv2.resize(fg, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
+def crop_to_face(
+    img: np.ndarray, above: float, below: float, sides: float,
+) -> np.ndarray:
+    """Crop to the subject, measured in multiples of the detected face box.
+
+    The pipeline normalises resolution by face size and detail by edge density,
+    but not composition. A photo taken from across a room spends most of the
+    paper on torso and room, leaving the face too small for its features to
+    survive the tracing. Cropping in face units keeps the framing consistent
+    however far away the subject sits.
+
+    Returns the image unchanged when no face is found, so a missed detection
+    costs framing rather than the whole drawing.
+    """
+    box = detect_face(img)
+    if box is None:
+        return img
+    fx, fy, fw, fh = box
+    cx = fx + fw / 2
+    h, w = img.shape[:2]
+    x0, x1 = max(0, int(cx - sides * fw)), min(w, int(cx + sides * fw))
+    y0, y1 = max(0, int(fy - above * fh)), min(h, int(fy + fh + below * fh))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return img
+    return img[y0:y1, x0:x1]
+
+
 def analyze_image(img: np.ndarray, isolate_subject: bool, face_detail: float,
                   face_size_px: int) -> tuple:
     """Grayscale the image; normalise resolution, optionally remove background.
@@ -371,12 +398,18 @@ def image_bytes_to_polylines(
     isolate_subject: bool = True,
     face_size_px: int = 520,
     auto_rotate: bool = True,
+    crop_face: bool = False,
+    crop_above: float = 1.2,
+    crop_below: float = 2.0,
+    crop_sides: float = 1.5,
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("could not decode image bytes")
+    if crop_face:
+        img = crop_to_face(img, crop_above, crop_below, crop_sides)
     gray, roi, face = analyze_image(img, isolate_subject, face_detail, face_size_px)
     if auto_rotate:
         img_h, img_w = gray.shape
@@ -403,6 +436,10 @@ def main() -> int:
     p.add_argument("--face-detail", type=float, default=6.0)
     p.add_argument("--face-size-px", type=int, default=520)
     p.add_argument("--isolate-subject", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--crop-face", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--crop-above", type=float, default=1.2)
+    p.add_argument("--crop-below", type=float, default=2.0)
+    p.add_argument("--crop-sides", type=float, default=1.5)
     p.add_argument("--region", type=int, default=10)
     p.add_argument("--low", type=int, default=50)
     p.add_argument("--high", type=int, default=120)
@@ -437,6 +474,10 @@ def main() -> int:
             detail=args.detail,
             face_detail=args.face_detail,
             isolate_subject=args.isolate_subject,
+            crop_face=args.crop_face,
+            crop_above=args.crop_above,
+            crop_below=args.crop_below,
+            crop_sides=args.crop_sides,
             face_size_px=args.face_size_px,
             auto_rotate=args.auto_rotate,
         )
