@@ -1,7 +1,7 @@
 // Machine connection and the polled state the dashboard renders.
 import { CameraClient, createRobotClient, type RobotClient } from '@viamrobotics/sdk'
 import { GenericServiceClient } from '@viamrobotics/sdk'
-import type { MachineTarget } from './machine'
+import { SIGNALING_ADDRESS, type MachineTarget } from './machine'
 
 export interface DrawerStatus {
   state: string
@@ -17,7 +17,7 @@ export interface DrawerStatus {
 export async function connect(target: MachineTarget): Promise<RobotClient> {
   return createRobotClient({
     host: target.host,
-    signalingAddress: 'https://app.viam.com:443',
+    signalingAddress: SIGNALING_ADDRESS,
     credentials: {
       type: 'api-key',
       authEntity: target.apiKeyId,
