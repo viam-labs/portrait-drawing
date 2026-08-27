@@ -629,3 +629,53 @@ func TestParseCaptureAndDrawArgs_recaptureKeepsStrokeArgs(t *testing.T) {
 	test.That(t, got.MarginMM, test.ShouldEqual, 25.0)
 	test.That(t, got.PreviewPxPerMM, test.ShouldEqual, defaultPreviewPxPerMM)
 }
+
+func TestDrawOrPreview_pushesToPreviewCameraOnPreview(t *testing.T) {
+	var got map[string]interface{}
+	cam := inject.NewCamera("line-preview")
+	cam.DoFunc = func(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+		got = cmd
+		return nil, nil
+	}
+	d := &drawer{
+		logger:        logging.NewTestLogger(t),
+		cfg:           &Config{PaperWidthMM: 100, PaperHeightMM: 60, PreviewCamera: "line-preview"},
+		previewCamera: cam,
+	}
+	resp, err := d.drawOrPreview(context.Background(), []Polyline{{{0, 0}, {10, 10}}},
+		&strokeArgs{Preview: true, PreviewPxPerMM: 2})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got, test.ShouldNotBeNil)
+	test.That(t, resp["preview_camera"], test.ShouldEqual, "line-preview")
+	_, hasB64 := resp["preview_png_b64"]
+	test.That(t, hasB64, test.ShouldBeFalse)
+}
+
+func TestDrawOrPreview_previewFailureIsFatalOnlyForPreview(t *testing.T) {
+	// Mid-draw the picture is a convenience; refusing to draw over it would be
+	// the wrong trade. Asking for a preview and getting none is a real failure.
+	cam := inject.NewCamera("line-preview")
+	cam.DoFunc = func(_ context.Context, _ map[string]interface{}) (map[string]interface{}, error) {
+		return nil, errors.New("buffer unavailable")
+	}
+	d := &drawer{
+		logger:        logging.NewTestLogger(t),
+		cfg:           &Config{PaperWidthMM: 100, PaperHeightMM: 60, PreviewCamera: "line-preview"},
+		previewCamera: cam,
+	}
+	_, err := d.drawOrPreview(context.Background(), []Polyline{{{0, 0}, {10, 10}}},
+		&strokeArgs{Preview: true, PreviewPxPerMM: 2})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "push preview")
+}
+
+func TestDrawOrPreview_fallsBackToBase64WithoutACamera(t *testing.T) {
+	d := &drawer{
+		logger: logging.NewTestLogger(t),
+		cfg:    &Config{PaperWidthMM: 100, PaperHeightMM: 60},
+	}
+	resp, err := d.drawOrPreview(context.Background(), []Polyline{{{0, 0}, {10, 10}}},
+		&strokeArgs{Preview: true, PreviewPxPerMM: 2})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["preview_png_b64"], test.ShouldNotBeNil)
+}
