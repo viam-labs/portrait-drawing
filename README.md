@@ -388,5 +388,23 @@ cd web && npm ci && npm run dev   # local development
 make web                          # production bundle, as CI and the release build do
 ```
 
+For local development against a real machine, create `web/.env.local` (gitignored)
+with a **machine-scoped** API key — the dashboard reads one machine and an
+organization key would be far more authority than the job needs:
+
+```
+VITE_MACHINE_HOST=your-machine.abc123.viam.cloud
+VITE_API_KEY_ID=...
+VITE_API_KEY=...
+```
+
+That fallback is behind `import.meta.env.DEV`, so Vite drops it from a
+production build and the values are never inlined into one. Credentials Viam
+supplies always take precedence.
+
+Each source is polled independently: losing the drawer's status does not blank
+the photo and line art, since a drawer too old to know the `status` verb still
+draws and its cameras still hold frames.
+
 `vite.config.ts` sets `base: './'`. Viam serves the bundle from a sub-path, so
 absolute asset URLs load locally and break once deployed.
