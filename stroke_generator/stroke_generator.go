@@ -43,6 +43,16 @@ type Config struct {
 	FaceSizePx     *int     `json:"face_size_px,omitempty"`
 	IsolateSubject *bool    `json:"isolate_subject,omitempty"`
 
+	// CropFace crops to the subject before tracing, measured in multiples of
+	// the detected face box. A photo taken from across a room spends most of
+	// the paper on torso and room, leaving the face too small for its features
+	// to survive; cropping in face units keeps framing consistent however far
+	// away the subject sits. Nil leaves cropping off.
+	CropFace  *bool    `json:"crop_face,omitempty"`
+	CropAbove *float64 `json:"crop_above,omitempty"`
+	CropBelow *float64 `json:"crop_below,omitempty"`
+	CropSides *float64 `json:"crop_sides,omitempty"`
+
 	Region  int     `json:"region,omitempty"`
 	Low     int     `json:"low,omitempty"`
 	High    int     `json:"high,omitempty"`
@@ -75,6 +85,13 @@ func (cfg *Config) Validate(_ string) ([]string, []string, error) {
 	}
 	if cfg.FaceSizePx != nil && *cfg.FaceSizePx < 0 {
 		return nil, nil, fmt.Errorf("face_size_px must be >= 0, got %d", *cfg.FaceSizePx)
+	}
+	for name, v := range map[string]*float64{
+		"crop_above": cfg.CropAbove, "crop_below": cfg.CropBelow, "crop_sides": cfg.CropSides,
+	} {
+		if v != nil && *v < 0 {
+			return nil, nil, fmt.Errorf("%s must be >= 0, got %g", name, *v)
+		}
 	}
 	if cfg.Region < 0 {
 		return nil, nil, fmt.Errorf("region must be >= 0, got %d", cfg.Region)
@@ -246,6 +263,22 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 		} else {
 			args = append(args, "--no-isolate-subject")
 		}
+	}
+	if s.cfg.CropFace != nil {
+		if *s.cfg.CropFace {
+			args = append(args, "--crop-face")
+		} else {
+			args = append(args, "--no-crop-face")
+		}
+	}
+	if s.cfg.CropAbove != nil {
+		args = append(args, "--crop-above", strconv.FormatFloat(*s.cfg.CropAbove, 'f', -1, 64))
+	}
+	if s.cfg.CropBelow != nil {
+		args = append(args, "--crop-below", strconv.FormatFloat(*s.cfg.CropBelow, 'f', -1, 64))
+	}
+	if s.cfg.CropSides != nil {
+		args = append(args, "--crop-sides", strconv.FormatFloat(*s.cfg.CropSides, 'f', -1, 64))
 	}
 	if a.Mirror {
 		args = append(args, "--mirror")
