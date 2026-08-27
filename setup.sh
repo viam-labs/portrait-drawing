@@ -12,11 +12,12 @@ elif [[ "$OS" == "Darwin" ]]; then
     brew install nlopt-static
 fi
 
-# Node, for building the web application. Viam's Linux build runner ships none,
-# and its macOS runner ships one too old for the toolchain -- so check the
-# version rather than merely whether node exists.
+# Node, for building the web application. Viam's Linux build runner ships none
+# and its macOS runner ships v20.13, so check the version rather than merely
+# whether node exists. The floor is what vite 6 requires; vite 7 and 8 raise it
+# to 20.19, which the macOS runner does not meet.
 NODE_MIN_MAJOR=20
-NODE_MIN_MINOR=19
+NODE_MIN_MINOR=0
 
 node_new_enough() {
     command -v node >/dev/null 2>&1 || return 1
