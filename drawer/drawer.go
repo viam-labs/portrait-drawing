@@ -175,6 +175,103 @@ type drawer struct {
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
+	progress progress
+}
+
+// Phases a drawing passes through, reported by the status verb. A drawing runs
+// for minutes with the DoCommand that started it still outstanding, so this is
+// the only way a caller can tell what is happening — or that anything is.
+const (
+	phaseIdle       = "idle"
+	phaseMoving     = "moving_to_capture_pose"
+	phaseCapturing  = "capturing"
+	phaseGenerating = "generating_strokes"
+	phaseDrawing    = "drawing"
+	phaseDone       = "done"
+	phaseCanceled   = "canceled"
+	phaseFailed     = "failed"
+)
+
+type progress struct {
+	phase          string
+	polylinesTotal int
+	polylinesDone  int
+	pointsTotal    int
+	startedAt      time.Time
+	endedAt        time.Time
+	lastError      string
+}
+
+func (d *drawer) setPhase(phase string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if phase == phaseMoving || (phase == phaseGenerating && d.progress.startedAt.IsZero()) {
+		d.progress = progress{startedAt: time.Now()}
+	}
+	d.progress.phase = phase
+	if phase == phaseDone || phase == phaseCanceled || phase == phaseFailed {
+		d.progress.endedAt = time.Now()
+	}
+}
+
+func (d *drawer) setFailed(err error) {
+	d.mu.Lock()
+	d.progress.phase = phaseFailed
+	d.progress.lastError = err.Error()
+	d.progress.endedAt = time.Now()
+	d.mu.Unlock()
+}
+
+func (d *drawer) startDrawing(polylines, points int) {
+	d.mu.Lock()
+	d.progress.phase = phaseDrawing
+	d.progress.polylinesTotal = polylines
+	d.progress.pointsTotal = points
+	d.progress.polylinesDone = 0
+	if d.progress.startedAt.IsZero() {
+		d.progress.startedAt = time.Now()
+	}
+	d.mu.Unlock()
+}
+
+func (d *drawer) advanceDrawing(done int) {
+	d.mu.Lock()
+	d.progress.polylinesDone = done
+	d.mu.Unlock()
+}
+
+// status is readable while a drawing is in flight: executeDraw holds the draw
+// slot but not the mutex, so this does not wait on it.
+func (d *drawer) status() map[string]interface{} {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	p := d.progress
+	phase := p.phase
+	if phase == "" {
+		phase = phaseIdle
+	}
+	out := map[string]interface{}{
+		"state":   phase,
+		"drawing": d.cancelFn != nil,
+	}
+	if !p.startedAt.IsZero() {
+		out["started_at"] = p.startedAt.UTC().Format(time.RFC3339)
+		end := p.endedAt
+		if end.IsZero() {
+			end = time.Now()
+		}
+		out["elapsed_sec"] = end.Sub(p.startedAt).Round(time.Second).Seconds()
+	}
+	if p.polylinesTotal > 0 {
+		out["polylines_total"] = p.polylinesTotal
+		out["polylines_done"] = p.polylinesDone
+		out["points_total"] = p.pointsTotal
+		out["percent"] = p.polylinesDone * 100 / p.polylinesTotal
+	}
+	if p.lastError != "" {
+		out["last_error"] = p.lastError
+	}
+	return out
 }
 
 func newDrawer(
@@ -307,11 +404,13 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		return d.captureAndDraw(ctx, cmd["capture_and_draw"])
 	case "cancel":
 		return d.cancel(ctx)
+	case "status":
+		return d.status(), nil
 	case "go_home":
 		return d.goHome(ctx)
 	default:
 		return nil, fmt.Errorf(
-			"drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"capture_and_draw\", \"cancel\", or \"go_home\"", v)
+			"drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"capture_and_draw\", \"status\", \"cancel\", or \"go_home\"", v)
 	}
 }
 
@@ -404,6 +503,7 @@ func (d *drawer) cancel(ctx context.Context) (map[string]interface{}, error) {
 		return map[string]interface{}{"canceled": false, "reason": "nothing running"}, nil
 	}
 	cancelFn()
+	d.setPhase(phaseCanceled)
 	if err := d.arm.Stop(ctx, nil); err != nil {
 		d.logger.Warnf("drawer: arm.Stop during cancel: %v", err)
 	}
@@ -513,8 +613,10 @@ func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[str
 	}
 	defer release()
 
+	d.setPhase(phaseGenerating)
 	polylines, err := d.generateStrokes(ctx, a.ImageB64, "", &a.strokeArgs)
 	if err != nil {
+		d.setFailed(err)
 		return nil, err
 	}
 	return d.drawOrPreview(ctx, polylines, &a.strokeArgs)
@@ -540,6 +642,7 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 	defer release()
 
 	if a.recapture() {
+		d.setPhase(phaseMoving)
 		if d.hasRestPose() {
 			if moveErr := d.goToRestPose(ctx, nil); moveErr != nil {
 				return nil, fmt.Errorf("drawer: move to capture pose: %w", moveErr)
@@ -547,7 +650,9 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 		} else {
 			d.logger.Warn("drawer: capture_and_draw with no capture_pose or home_pose configured; capturing from the arm's current pose")
 		}
+		d.setPhase(phaseCapturing)
 		if photoErr := d.triggerPhoto(ctx); photoErr != nil {
+			d.setFailed(photoErr)
 			return nil, photoErr
 		}
 	} else {
@@ -556,10 +661,13 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 
 	imageB64, depthB64, err := d.readPhoto(ctx)
 	if err != nil {
+		d.setFailed(err)
 		return nil, err
 	}
+	d.setPhase(phaseGenerating)
 	polylines, err := d.generateStrokes(ctx, imageB64, depthB64, &a.strokeArgs)
 	if err != nil {
+		d.setFailed(err)
 		return nil, err
 	}
 	return d.drawOrPreview(ctx, polylines, &a.strokeArgs)
@@ -771,6 +879,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		total += len(poly)
 	}
 	d.logger.Infof("drawer: drawing %d polylines, %d points", len(polylines), total)
+	d.startDrawing(len(polylines), total)
 	startedAt := time.Now()
 	drawn, nextProgress := 0, progressStepPercent
 
@@ -780,12 +889,19 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
 		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
 		if err := d.planAndExecute(ctx, fs, target, d.constraints(wp.linear)); err != nil {
-			return nil, fmt.Errorf("drawer: %s: %w", wp.label, err)
+			wrapped := fmt.Errorf("drawer: %s: %w", wp.label, err)
+			if ctx.Err() != nil {
+				d.setPhase(phaseCanceled)
+			} else {
+				d.setFailed(wrapped)
+			}
+			return nil, wrapped
 		}
 		if !wp.endsPolyline {
 			continue
 		}
 		drawn++
+		d.advanceDrawing(drawn)
 		// 100% is left to the "finished" line below.
 		if percent := drawn * 100 / len(polylines); percent >= nextProgress && percent < 100 {
 			d.logger.Infof("drawer: %d%% — %d/%d polylines, %s elapsed",
@@ -799,9 +915,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 
 	if d.hasRestPose() {
 		if err := d.goToRestPose(ctx, fs); err != nil {
+			d.setFailed(err)
 			return nil, fmt.Errorf("drawer: return to rest pose: %w", err)
 		}
 	}
+	d.setPhase(phaseDone)
 
 	return map[string]interface{}{
 		"total_points": total,
@@ -908,5 +1026,5 @@ func applyJointLimits(logger logging.Logger, fs *referenceframe.FrameSystem, inp
 }
 
 func (d *drawer) Status(_ context.Context) (map[string]interface{}, error) {
-	return map[string]interface{}{"state": "ready"}, nil
+	return d.status(), nil
 }

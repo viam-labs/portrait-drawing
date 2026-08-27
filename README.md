@@ -205,6 +205,34 @@ top-left corner. This is what the other verbs call underneath.
 {"draw": {"polylines": [[[0, 0], [10, 5]], [[20, 20], [25, 30]]]}}
 ```
 
+### `status`
+
+A drawing runs for minutes with the DoCommand that started it still outstanding,
+so this is how you find out what is happening — or whether anything is.
+
+```json
+{"status": {}}
+```
+```json
+{
+  "state": "drawing",
+  "drawing": true,
+  "started_at": "2026-08-27T18:37:51Z",
+  "elapsed_sec": 102,
+  "polylines_total": 138,
+  "polylines_done": 35,
+  "points_total": 1590,
+  "percent": 25
+}
+```
+
+`state` moves through `idle` → `moving_to_capture_pose` → `capturing` →
+`generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
+(with `last_error`). The counts appear once drawing starts.
+
+Readable while a drawing is in flight: `executeDraw` holds the draw slot but not
+the mutex, so this does not queue behind it.
+
 ### `cancel` and `go_home`
 
 `cancel` aborts whatever is drawing and stops the arm. `go_home` moves to the

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/logging"
@@ -678,4 +679,66 @@ func TestDrawOrPreview_fallsBackToBase64WithoutACamera(t *testing.T) {
 		&strokeArgs{Preview: true, PreviewPxPerMM: 2})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, resp["preview_png_b64"], test.ShouldNotBeNil)
+}
+
+func TestStatus_idleBeforeAnything(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	s := d.status()
+	test.That(t, s["state"], test.ShouldEqual, phaseIdle)
+	test.That(t, s["drawing"], test.ShouldEqual, false)
+	_, hasTotal := s["polylines_total"]
+	test.That(t, hasTotal, test.ShouldBeFalse)
+}
+
+func TestStatus_reportsDrawingProgress(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	d.setPhase(phaseMoving)
+	d.startDrawing(138, 1590)
+	d.advanceDrawing(35)
+	s := d.status()
+	test.That(t, s["state"], test.ShouldEqual, phaseDrawing)
+	test.That(t, s["polylines_total"], test.ShouldEqual, 138)
+	test.That(t, s["polylines_done"], test.ShouldEqual, 35)
+	test.That(t, s["points_total"], test.ShouldEqual, 1590)
+	test.That(t, s["percent"], test.ShouldEqual, 25)
+	test.That(t, s["elapsed_sec"], test.ShouldNotBeNil)
+}
+
+func TestStatus_readableWhileTheSlotIsHeld(t *testing.T) {
+	// The whole point: a drawing runs for minutes with its DoCommand still
+	// outstanding, so status must not wait on the draw slot.
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	_, release, err := d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	defer release()
+	d.startDrawing(10, 100)
+	d.advanceDrawing(3)
+	s := d.status()
+	test.That(t, s["drawing"], test.ShouldEqual, true)
+	test.That(t, s["polylines_done"], test.ShouldEqual, 3)
+}
+
+func TestStatus_failureIsRecorded(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	d.setPhase(phaseMoving)
+	d.setFailed(errors.New("planner gave up"))
+	s := d.status()
+	test.That(t, s["state"], test.ShouldEqual, phaseFailed)
+	test.That(t, s["last_error"], test.ShouldContainSubstring, "planner gave up")
+}
+
+func TestStatus_elapsedStopsAtTheEnd(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	d.setPhase(phaseMoving)
+	d.setPhase(phaseDone)
+	first := d.status()["elapsed_sec"]
+	time.Sleep(1100 * time.Millisecond)
+	test.That(t, d.status()["elapsed_sec"], test.ShouldEqual, first)
+}
+
+func TestDoCommand_statusVerb(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	resp, err := d.DoCommand(context.Background(), map[string]interface{}{"status": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["state"], test.ShouldEqual, phaseIdle)
 }
