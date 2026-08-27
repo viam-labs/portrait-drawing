@@ -48,5 +48,10 @@ jobs:
       - name: Build
         run: make build
 
+      # The stroke-generator cannot extract anything without the line model, so
+      # CI needs it for the same reason the target machine does.
+      - name: Fetch models
+        run: make models
+
       - name: Test
         run: make test
