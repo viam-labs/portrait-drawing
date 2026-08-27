@@ -48,6 +48,11 @@ jobs:
       - name: Build
         run: make build
 
+      # The application bundle ships in the module tarball, so a build failure
+      # here is a broken release even though no Go test touches it.
+      - name: Build web application
+        run: make web
+
       # The stroke-generator cannot extract anything without the line model, so
       # CI needs it for the same reason the target machine does.
       - name: Fetch models
