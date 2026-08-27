@@ -30,6 +30,8 @@ Prints {"polylines": [[[x, y], ...], ...]} to stdout.
 
 import argparse
 import json
+import pathlib
+import struct
 import sys
 from pathlib import Path
 
@@ -160,6 +162,31 @@ def subject_mask(img: np.ndarray, face: tuple = None) -> np.ndarray:
     return cv2.resize(fg, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
+def face_crop_box(
+    img: np.ndarray, above: float, below: float, sides: float,
+) -> tuple:
+    """Crop rectangle around the detected face, in multiples of the face box.
+
+    Returned separately from the cropping itself so an aligned depth frame can
+    be cut to exactly the same rectangle — cropping the two independently would
+    misalign them, and a depth mask that is off by a crop is worse than none.
+
+    Returns None when no face is found, so a missed detection costs framing
+    rather than the whole drawing.
+    """
+    box = detect_face(img)
+    if box is None:
+        return None
+    fx, fy, fw, fh = box
+    cx = fx + fw / 2
+    h, w = img.shape[:2]
+    x0, x1 = max(0, int(cx - sides * fw)), min(w, int(cx + sides * fw))
+    y0, y1 = max(0, int(fy - above * fh)), min(h, int(fy + fh + below * fh))
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    return x0, y0, x1, y1
+
+
 def crop_to_face(
     img: np.ndarray, above: float, below: float, sides: float,
 ) -> np.ndarray:
@@ -170,46 +197,75 @@ def crop_to_face(
     paper on torso and room, leaving the face too small for its features to
     survive the tracing. Cropping in face units keeps the framing consistent
     however far away the subject sits.
-
-    Returns the image unchanged when no face is found, so a missed detection
-    costs framing rather than the whole drawing.
     """
-    box = detect_face(img)
-    if box is None:
+    rect = face_crop_box(img, above, below, sides)
+    if rect is None:
         return img
-    fx, fy, fw, fh = box
-    cx = fx + fw / 2
-    h, w = img.shape[:2]
-    x0, x1 = max(0, int(cx - sides * fw)), min(w, int(cx + sides * fw))
-    y0, y1 = max(0, int(fy - above * fh)), min(h, int(fy + fh + below * fh))
-    if x1 - x0 < 2 or y1 - y0 < 2:
-        return img
+    x0, y0, x1, y1 = rect
     return img[y0:y1, x0:x1]
 
 
-def isolate(img: np.ndarray, isolate_subject: bool, head_span: float = 2.4) -> tuple:
-    """Return (image, subject mask or None).
+def decode_depth(raw: bytes) -> np.ndarray:
+    """Decode a Viam DEPTHMAP payload into a millimetre array.
+
+    Layout is an 8-byte magic, then width and height as big-endian uint64, then
+    one big-endian uint16 per pixel. Zero means the sensor returned nothing for
+    that pixel, which is not the same as "close".
+    """
+    if len(raw) < 24 or raw[:8] != b"DEPTHMAP":
+        raise ValueError("not a Viam DEPTHMAP payload")
+    width, height = struct.unpack(">QQ", raw[8:24])
+    expected = 24 + width * height * 2
+    if len(raw) < expected:
+        raise ValueError(f"depth payload is {len(raw)} bytes, expected {expected}")
+    return np.frombuffer(raw[24:expected], dtype=">u2").reshape(height, width).astype(np.float32)
+
+
+def depth_mask(
+    depth: np.ndarray, shape: tuple, max_depth_mm: float, min_depth_mm: float = 0.0,
+) -> np.ndarray:
+    """Foreground mask from depth: a distance band, and actually measured.
+
+    Colour segmentation cannot separate dark hair from dark clutter behind it —
+    they are the same colour, and GrabCut merges them into one foreground blob.
+    Distance is not fooled by that. Pixels with no reading are excluded rather
+    than treated as near, since a dropout is unknown, not close.
+
+    The near bound matters as much as the far one on an arm-mounted camera: the
+    pen and its holder sit a few hundred millimetres from the lens, well in
+    front of any sitter, and get drawn into every portrait otherwise.
+    """
+    near = ((depth > min_depth_mm) & (depth <= max_depth_mm)).astype(np.uint8) * 255
+    if near.shape != shape:
+        near = cv2.resize(near, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    # Close the speckle the sensor leaves around hair and edges.
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+    near = cv2.morphologyEx(near, cv2.MORPH_CLOSE, kernel)
+    return cv2.morphologyEx(near, cv2.MORPH_OPEN, kernel) > 0
+
+
+def isolate(
+    img: np.ndarray,
+    isolate_subject: bool,
+    depth: np.ndarray = None,
+    max_depth_mm: float = 1500.0,
+    min_depth_mm: float = 0.0,
+) -> tuple:
+    """Return (image, foreground mask or None).
 
     The line model draws whatever is in frame, so without a mask the arm spends
-    its minutes on the room. GrabCut alone is not enough for a portrait: dark
-    hair against dark clutter merges into one foreground blob, and the largest
-    connected component then includes a chair rack. Bounding it to an ellipse
-    around the head cuts that off — safe here because the crop is a head-and-
-    shoulders portrait, so nothing worth drawing lies outside it.
+    its minutes on the room behind the sitter.
+
+    Depth is used when supplied and colour segmentation is the fallback. That
+    order is deliberate: GrabCut cannot separate dark hair from dark clutter
+    behind it, because they are the same colour and it merges them into a single
+    foreground blob. Distance is indifferent to that.
     """
     if not isolate_subject:
         return img, None
-    box = detect_face(img)
-    mask = subject_mask(img, face=box) > 0
-    if box is not None:
-        fx, fy, fw, fh = box
-        bound = np.zeros(mask.shape, np.uint8)
-        cv2.ellipse(bound,
-                    (int(fx + fw / 2), int(fy + fh / 2 - 0.12 * fh)),
-                    (int(head_span * fw), int(head_span * fh)),
-                    0, 0, 360, 255, -1)
-        mask &= bound > 0
-    return img, mask
+    if depth is not None:
+        return img, depth_mask(depth, img.shape[:2], max_depth_mm, min_depth_mm)
+    return img, subject_mask(img, face=detect_face(img)) > 0
 
 
 def enhance(img: np.ndarray, clahe_clip: float) -> np.ndarray:
@@ -420,21 +476,37 @@ def image_bytes_to_polylines(
     low: float = 4.0,
     high: float = 12.0,
     isolate_subject: bool = True,
-    head_span: float = 2.4,
     auto_rotate: bool = True,
     crop_face: bool = False,
     crop_above: float = 1.2,
     crop_below: float = 2.0,
     crop_sides: float = 1.5,
+    depth_bytes: bytes = None,
+    max_depth_mm: float = 1500.0,
+    min_depth_mm: float = 0.0,
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("could not decode image bytes")
+
+    depth = decode_depth(depth_bytes) if depth_bytes else None
+    if depth is not None and depth.shape != img.shape[:2]:
+        # The camera aligns depth to colour, so a mismatch here means differing
+        # resolutions rather than differing viewpoints; nearest-neighbour keeps
+        # the millimetre values intact where bilinear would invent readings.
+        depth = cv2.resize(depth, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+
     if crop_face:
-        img = crop_to_face(img, crop_above, crop_below, crop_sides)
-    img, roi = isolate(img, isolate_subject, head_span)
+        rect = face_crop_box(img, crop_above, crop_below, crop_sides)
+        if rect is not None:
+            x0, y0, x1, y1 = rect
+            img = img[y0:y1, x0:x1]
+            if depth is not None:
+                depth = depth[y0:y1, x0:x1]
+
+    img, roi = isolate(img, isolate_subject, depth, max_depth_mm, min_depth_mm)
     if auto_rotate:
         img_h, img_w = img.shape[:2]
         rotate = _rotation_for_paper(img_w, img_h, paper_width_mm, paper_height_mm)
@@ -459,7 +531,11 @@ def main() -> int:
     p.add_argument("--clahe", type=float, default=2.0)
     p.add_argument("--sigma", type=float, default=2.2)
     p.add_argument("--isolate-subject", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--head-span", type=float, default=2.4)
+    p.add_argument("--depth", type=pathlib.Path,
+                   help="Viam DEPTHMAP file aligned to the photo; enables depth masking")
+    p.add_argument("--max-depth-mm", type=float, default=1500.0)
+    p.add_argument("--min-depth-mm", type=float, default=0.0,
+                   help="drop anything nearer than this; excludes an arm-mounted pen")
     p.add_argument("--crop-face", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--crop-above", type=float, default=1.2)
     p.add_argument("--crop-below", type=float, default=2.0)
@@ -495,7 +571,9 @@ def main() -> int:
             smooth=args.smooth,
             min_dist=args.min_dist,
             isolate_subject=args.isolate_subject,
-            head_span=args.head_span,
+            depth_bytes=args.depth.read_bytes() if args.depth else None,
+            max_depth_mm=args.max_depth_mm,
+            min_depth_mm=args.min_depth_mm,
             crop_face=args.crop_face,
             crop_above=args.crop_above,
             crop_below=args.crop_below,

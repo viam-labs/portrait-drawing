@@ -4,8 +4,10 @@ import numpy as np
 from image_to_polylines import (
     _rotate_ccw,
     _rotation_for_paper,
-    analyze_image,
-    auto_canny_thresholds,
+    decode_depth,
+    depth_mask,
+    face_crop_box,
+    isolate,
     image_bytes_to_polylines,
     polylines_to_mm,
 )
@@ -28,10 +30,6 @@ def test_pipeline_returns_polylines_in_paper_mm():
         margin_mm=40.0,
         rotate=0,
         mirror=False,
-        region=0,
-        low=60,
-        high=160,
-        merge=5,
         prune=25,
         min_len=30,
         smooth=2.5,
@@ -52,8 +50,7 @@ def test_rejects_bad_bytes():
     try:
         image_bytes_to_polylines(
             b"not an image", paper_width_mm=100, paper_height_mm=100,
-            margin_mm=10, rotate=0, mirror=False, region=0, low=60, high=160,
-            merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
+            margin_mm=10, rotate=0, mirror=False, prune=25, min_len=30, smooth=2.5, min_dist=8,
         )
     except ValueError as e:
         assert "decode" in str(e)
@@ -104,8 +101,7 @@ def test_auto_rotate_default_true():
     polylines = image_bytes_to_polylines(
         _synthetic_image_bytes(),
         paper_width_mm=215.9, paper_height_mm=279.4, margin_mm=40.0,
-        rotate=0, mirror=False, region=0, low=60, high=160,
-        merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
+        rotate=0, mirror=False, prune=25, min_len=30, smooth=2.5, min_dist=8,
     )
     # For a square input, auto-rotate picks 0° (no rotation); just check it ran.
     assert isinstance(polylines, list)
@@ -117,44 +113,83 @@ def test_pipeline_with_isolate_subject_off():
     polylines = image_bytes_to_polylines(
         _synthetic_image_bytes(),
         paper_width_mm=215.9, paper_height_mm=279.4, margin_mm=40.0,
-        rotate=0, mirror=False, region=0, low=60, high=160,
-        merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
-        isolate_subject=False, face_detail=0.0,
+        rotate=0, mirror=False, prune=25, min_len=30, smooth=2.5, min_dist=8,
+        isolate_subject=False,
     )
     assert isinstance(polylines, list)
     assert len(polylines) > 0
 
 
-def test_pipeline_with_adaptive_detail():
-    """detail > 0 auto-tunes thresholds (ignores low/high); pipeline runs."""
+def test_pipeline_with_depth_masking():
+    """A depth frame replaces colour segmentation; the pipeline still runs."""
+    import struct
+
+    size = 256
+    depth = np.full((size, size), 3000, dtype=">u2")
+    depth[40:216, 40:216] = 1000
+    raw = b"DEPTHMAP" + struct.pack(">QQ", size, size) + depth.tobytes()
     polylines = image_bytes_to_polylines(
         _synthetic_image_bytes(),
         paper_width_mm=215.9, paper_height_mm=279.4, margin_mm=40.0,
-        rotate=0, mirror=False, region=0, low=60, high=160,
-        merge=5, prune=25, min_len=30, smooth=2.5, min_dist=8,
-        detail=2.0, isolate_subject=False, face_detail=0.0,
+        rotate=0, mirror=False, prune=25, min_len=30, smooth=2.5, min_dist=8,
+        depth_bytes=raw, max_depth_mm=1500,
     )
     assert isinstance(polylines, list)
-    assert len(polylines) > 0
 
 
-def test_analyze_image_returns_gray_roi_face():
-    """analyze_image returns a 2D gray plus (roi, face) that are None or masks."""
-    img = cv2.imdecode(
-        np.frombuffer(_synthetic_image_bytes(), np.uint8), cv2.IMREAD_COLOR,
-    )
-    gray, roi, face = analyze_image(
-        img, isolate_subject=False, face_detail=0.0, face_size_px=520,
-    )
-    assert gray.ndim == 2
-    assert roi is None          # background not removed
-    assert face is None         # face_detail off (and no face in a square)
+def test_isolate_off_returns_no_mask():
+    img = cv2.imdecode(np.frombuffer(_synthetic_image_bytes(), np.uint8), cv2.IMREAD_COLOR)
+    out, roi = isolate(img, isolate_subject=False)
+    assert out.shape == img.shape
+    assert roi is None
 
 
-def test_auto_canny_thresholds_ordered():
-    """Returns low <= high, both in a sane 0..300 range."""
-    filtered = cv2.imdecode(
-        np.frombuffer(_synthetic_image_bytes(), np.uint8), cv2.IMREAD_GRAYSCALE,
-    )
-    low, high = auto_canny_thresholds(filtered, target_frac=0.02)
-    assert 0 <= low <= high <= 300
+def _depth_payload(width, height, near_box=None, near_mm=1000, far_mm=3000):
+    """A Viam DEPTHMAP payload: everything far except an optional near rectangle."""
+    import struct
+
+    depth = np.full((height, width), far_mm, dtype=">u2")
+    if near_box:
+        x0, y0, x1, y1 = near_box
+        depth[y0:y1, x0:x1] = near_mm
+    return b"DEPTHMAP" + struct.pack(">QQ", width, height) + depth.tobytes()
+
+
+def test_decode_depth_roundtrip():
+    depth = decode_depth(_depth_payload(8, 4, near_box=(1, 1, 3, 3), near_mm=900))
+    assert depth.shape == (4, 8)
+    assert depth[2, 2] == 900
+    assert depth[0, 0] == 3000
+
+
+def test_decode_depth_rejects_junk():
+    for bad in (b"", b"NOTDEPTH" + b"\x00" * 16):
+        try:
+            decode_depth(bad)
+        except ValueError:
+            continue
+        raise AssertionError("expected ValueError")
+
+
+def test_depth_mask_keeps_the_near_band():
+    depth = decode_depth(_depth_payload(60, 60, near_box=(10, 10, 50, 50), near_mm=1000))
+    mask = depth_mask(depth, (60, 60), max_depth_mm=1500)
+    assert mask[30, 30]
+    assert not mask[2, 2]
+
+
+def test_depth_mask_excludes_unmeasured_pixels():
+    """A zero reading is unknown, not close: it must not count as foreground."""
+    depth = decode_depth(_depth_payload(40, 40, near_box=(5, 5, 35, 35), near_mm=0))
+    assert not depth_mask(depth, (40, 40), max_depth_mm=1500).any()
+
+
+def test_depth_mask_near_bound_drops_the_foreground():
+    """An arm-mounted pen sits nearer than any sitter and must be excluded."""
+    depth = decode_depth(_depth_payload(60, 60, near_box=(10, 10, 50, 50), near_mm=250))
+    assert depth_mask(depth, (60, 60), max_depth_mm=1500).any()
+    assert not depth_mask(depth, (60, 60), max_depth_mm=1500, min_depth_mm=350).any()
+
+
+def test_face_crop_box_none_without_a_face():
+    assert face_crop_box(np.zeros((80, 80, 3), np.uint8), 1.0, 1.0, 1.0) is None
