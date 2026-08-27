@@ -128,6 +128,30 @@ arm still moves to the capture pose and takes the photo, but stops there:
 {"capture_and_draw": {"preview": true}}
 ```
 
+| Option | Type | Description |
+|---|---|---|
+| `recapture` | bool | Take a new photo. Defaults to true. Set false to use the frame the `photo` camera already holds. |
+
+**`recapture: false` is what makes tuning practical.** A default
+`capture_and_draw` takes a fresh photo every time, so two previews with
+different stroke settings are comparing two different photographs. Shoot once,
+then iterate against that one frame:
+
+```json
+{"capture": {}}
+```
+```json
+{"capture_and_draw": {"recapture": false, "preview": true}}
+```
+
+It also fixes self-portraits from the app: triggering `capture_and_draw` by hand
+puts you at the keyboard three seconds later, not in front of the camera. Take
+the photo when you are in frame, then draw it. Triggering by gesture does not
+have this problem — you are already in frame when it fires.
+
+With `recapture: false` the arm does not move to the capture pose first, since
+there is nothing to frame.
+
 ### `draw_image`
 
 Same thing, but you supply the photo instead of the arm taking it.

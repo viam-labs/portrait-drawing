@@ -468,12 +468,27 @@ func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
 	return &a, nil
 }
 
-func parseCaptureAndDrawArgs(payload interface{}) (*strokeArgs, error) {
+// captureAndDrawArgs is the DoCommand payload for the "capture_and_draw" verb.
+type captureAndDrawArgs struct {
+	// Recapture, when nil, defaults to true. Set it false to draw the frame
+	// the photo camera already holds instead of taking a new one — which is
+	// what makes tuning possible, since successive previews then compare
+	// stroke settings against one fixed image rather than against a fresh
+	// photo each time.
+	Recapture *bool `json:"recapture,omitempty"`
+	strokeArgs
+}
+
+func (a *captureAndDrawArgs) recapture() bool {
+	return a.Recapture == nil || *a.Recapture
+}
+
+func parseCaptureAndDrawArgs(payload interface{}) (*captureAndDrawArgs, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
-	var a strokeArgs
+	var a captureAndDrawArgs
 	if unmarshalErr := json.Unmarshal(raw, &a); unmarshalErr != nil {
 		return nil, fmt.Errorf("parse payload: %w", unmarshalErr)
 	}
@@ -523,31 +538,43 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 	}
 	defer release()
 
-	if d.hasRestPose() {
-		if moveErr := d.goToRestPose(ctx, nil); moveErr != nil {
-			return nil, fmt.Errorf("drawer: move to capture pose: %w", moveErr)
+	if a.recapture() {
+		if d.hasRestPose() {
+			if moveErr := d.goToRestPose(ctx, nil); moveErr != nil {
+				return nil, fmt.Errorf("drawer: move to capture pose: %w", moveErr)
+			}
+		} else {
+			d.logger.Warn("drawer: capture_and_draw with no capture_pose or home_pose configured; capturing from the arm's current pose")
+		}
+		if photoErr := d.triggerPhoto(ctx); photoErr != nil {
+			return nil, photoErr
 		}
 	} else {
-		d.logger.Warn("drawer: capture_and_draw with no capture_pose or home_pose configured; capturing from the arm's current pose")
+		d.logger.Info("drawer: recapture is false; drawing the frame the photo camera already holds")
 	}
 
-	imageB64, err := d.capturePhoto(ctx)
+	imageB64, err := d.readPhoto(ctx)
 	if err != nil {
 		return nil, err
 	}
-	polylines, err := d.generateStrokes(ctx, imageB64, a)
+	polylines, err := d.generateStrokes(ctx, imageB64, &a.strokeArgs)
 	if err != nil {
 		return nil, err
 	}
-	return d.drawOrPreview(ctx, polylines, a)
+	return d.drawOrPreview(ctx, polylines, &a.strokeArgs)
 }
 
-// capturePhoto triggers the photo camera and reads back what it latched. The
-// countdown and image encoding are the photo camera's business, not the drawer's.
-func (d *drawer) capturePhoto(ctx context.Context) (string, error) {
+// triggerPhoto asks the photo camera for a new frame. The countdown and image
+// encoding are its business, not the drawer's.
+func (d *drawer) triggerPhoto(ctx context.Context) error {
 	if _, err := d.photo.DoCommand(ctx, map[string]interface{}{"capture": map[string]interface{}{}}); err != nil {
-		return "", fmt.Errorf("drawer: trigger photo %q: %w", d.cfg.Photo, err)
+		return fmt.Errorf("drawer: trigger photo %q: %w", d.cfg.Photo, err)
 	}
+	return nil
+}
+
+// readPhoto returns whatever frame the photo camera currently holds.
+func (d *drawer) readPhoto(ctx context.Context) (string, error) {
 	images, _, err := d.photo.Images(ctx, nil, nil)
 	if err != nil {
 		return "", fmt.Errorf("drawer: read photo %q: %w", d.cfg.Photo, err)

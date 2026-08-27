@@ -604,3 +604,28 @@ func TestConstraints_nilWhenNothingApplies(t *testing.T) {
 	test.That(t, d.constraints(false), test.ShouldBeNil)
 	test.That(t, d.constraints(true), test.ShouldNotBeNil)
 }
+
+func TestParseCaptureAndDrawArgs_recaptureDefaultsTrue(t *testing.T) {
+	got, err := parseCaptureAndDrawArgs(map[string]interface{}{})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.recapture(), test.ShouldBeTrue)
+}
+
+func TestParseCaptureAndDrawArgs_recaptureFalse(t *testing.T) {
+	got, err := parseCaptureAndDrawArgs(map[string]interface{}{"recapture": false})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.recapture(), test.ShouldBeFalse)
+}
+
+func TestParseCaptureAndDrawArgs_recaptureKeepsStrokeArgs(t *testing.T) {
+	got, err := parseCaptureAndDrawArgs(map[string]interface{}{
+		"recapture": false,
+		"preview":   true,
+		"margin_mm": 25.0,
+	})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, got.recapture(), test.ShouldBeFalse)
+	test.That(t, got.Preview, test.ShouldBeTrue)
+	test.That(t, got.MarginMM, test.ShouldEqual, 25.0)
+	test.That(t, got.PreviewPxPerMM, test.ShouldEqual, defaultPreviewPxPerMM)
+}
