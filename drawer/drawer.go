@@ -634,33 +634,49 @@ func (d *drawer) generateStrokes(
 }
 
 func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *strokeArgs) (map[string]interface{}, error) {
-	if !a.Preview {
-		return d.executeDraw(ctx, polylines)
+	total := 0
+	for _, poly := range polylines {
+		total += len(poly)
 	}
 	rendered, err := renderPreviewPNG(polylines, d.cfg.PaperWidthMM, d.cfg.PaperHeightMM, a.PreviewPxPerMM)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
-	total := 0
-	for _, poly := range polylines {
-		total += len(poly)
+	encoded := base64.StdEncoding.EncodeToString(rendered)
+
+	// Pushed before drawing as well as for a preview: a drawing takes minutes,
+	// and during them the preview camera would otherwise still show whatever
+	// was last previewed — stale, and indistinguishable from current.
+	pushed := false
+	if d.previewCamera != nil {
+		_, pushErr := d.previewCamera.DoCommand(ctx, map[string]interface{}{
+			"set_image": map[string]interface{}{"image_b64": encoded, "source_name": "line-preview"},
+		})
+		switch {
+		case pushErr == nil:
+			pushed = true
+		case a.Preview:
+			return nil, fmt.Errorf("drawer: push preview to %q: %w", d.cfg.PreviewCamera, pushErr)
+		default:
+			// Mid-draw the picture is a convenience, not the job. Losing it is
+			// not a reason to refuse to draw.
+			d.logger.Warnf("drawer: could not push preview to %q: %v", d.cfg.PreviewCamera, pushErr)
+		}
+	}
+
+	if !a.Preview {
+		return d.executeDraw(ctx, polylines)
 	}
 	resp := map[string]interface{}{
 		"preview":        true,
 		"polyline_count": len(polylines),
 		"total_points":   total,
 	}
-	encoded := base64.StdEncoding.EncodeToString(rendered)
-	if d.previewCamera == nil {
+	if pushed {
+		resp["preview_camera"] = d.cfg.PreviewCamera
+	} else {
 		resp["preview_png_b64"] = encoded
-		return resp, nil
 	}
-	if _, err := d.previewCamera.DoCommand(ctx, map[string]interface{}{
-		"set_image": map[string]interface{}{"image_b64": encoded, "source_name": "line-preview"},
-	}); err != nil {
-		return nil, fmt.Errorf("drawer: push preview to %q: %w", d.cfg.PreviewCamera, err)
-	}
-	resp["preview_camera"] = d.cfg.PreviewCamera
 	return resp, nil
 }
 

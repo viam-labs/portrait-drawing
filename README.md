@@ -179,6 +179,10 @@ Accepted by both `capture_and_draw` and `draw_image`:
 what the pen will actually trace, not what the camera saw. A drawing can take
 several minutes of arm motion, so it is worth a look first.
 
+The render is pushed to `preview_camera` on **every** drawing, not only on
+previews, so during the minutes an arm spends drawing, the panel shows what it
+is drawing rather than whatever was previewed last.
+
 With `preview_camera` configured, the render is pushed there and you watch it in
 the app's camera panel:
 
