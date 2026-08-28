@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte'
   import type { RobotClient } from '@viamrobotics/sdk'
-  import { machineTarget } from './machine'
+  import { lookedFor, machineTarget } from './machine'
   import { connect, drawerStatus, frameURL, type DrawerStatus } from './client'
   import Panel from './lib/Panel.svelte'
   import Progress from './lib/Progress.svelte'
@@ -68,7 +68,7 @@
       <h1>Portrait Drawing</h1>
       <p class="muted">
         {#if target}{target.host}{:else}not connected{/if}
-        {#if target?.fromEnv}<span class="tag">dev credentials</span>{/if}
+        {#if target && target.source !== 'viam'}<span class="tag">{target.source}</span>{/if}
       </p>
     </div>
     <Phase state={status?.state} drawing={status?.drawing} />
@@ -77,8 +77,11 @@
   {#if !target}
     <Panel title="No machine">
       <p class="muted">
-        Open this from its Viam application, which supplies the machine and its
-        credentials. For local development, set <code>web/.env.local</code>.
+        This page gets its machine and credentials from Viam when opened through
+        the application. It looked for {lookedFor()} and found nothing.
+      </p>
+      <p class="muted">
+        For local development, set <code>web/.env.local</code>.
       </p>
     </Panel>
   {:else if error}

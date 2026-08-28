@@ -1,37 +1,46 @@
-// Connection to the machine this application was opened for.
+// Finding the machine this application was opened for.
 //
-// A single_machine application is served with the machine's hostname in the URL
-// and credentials in cookies, both set by app.viam.com when the viewer picks a
-// machine. Nothing here prompts for or stores credentials itself.
+// Shapes follow the RDK's own app template; they are not guessable, and getting
+// them wrong looks exactly like a machine being offline. In order of preference:
+//
+//  1. host / api-key-id / api-key cookies, set by `viam module local-app-testing`
+//  2. the per-machine cookie viamapplications.com sets, named by the machine id
+//     in the /machine/<id>/... path
+//  3. web/.env.local, for development against a real machine
 import { getCookie } from 'typescript-cookie'
+
+export type CredentialSource = 'local-app-testing' | 'viam' | 'env'
 
 export interface MachineTarget {
   host: string
   apiKeyId: string
   apiKeySecret: string
-  /** True when the credentials came from .env.local rather than from Viam. */
-  fromEnv: boolean
+  source: CredentialSource
 }
 
-function machineHost(): string {
-  const params = new URLSearchParams(window.location.search)
-  return (
-    params.get('machineId') ??
-    params.get('machine') ??
-    window.location.pathname.split('/').filter(Boolean).pop() ??
-    ''
-  )
+export const SIGNALING_ADDRESS = 'https://app.viam.com:443'
+
+function fromTestingCookies(): MachineTarget | null {
+  const host = getCookie('host')
+  const apiKeyId = getCookie('api-key-id')
+  const apiKeySecret = getCookie('api-key')
+  if (!host || !apiKeyId || !apiKeySecret) return null
+  return { host, apiKeyId, apiKeySecret, source: 'local-app-testing' }
 }
 
 function fromViam(): MachineTarget | null {
-  const host = machineHost()
-  if (!host) return null
-  const raw = getCookie(host)
+  // The path is /machine/<id>/..., and the cookie is named by that id.
+  const parts = window.location.pathname.split('/')
+  if (parts.length < 3 || parts[1] !== 'machine') return null
+  const raw = getCookie(parts[2])
   if (!raw) return null
   try {
-    const { hostname, key, key_id: keyId } = JSON.parse(raw)
-    if (!key || !keyId) return null
-    return { host: hostname ?? host, apiKeyId: keyId, apiKeySecret: key, fromEnv: false }
+    const parsed = JSON.parse(raw)
+    const host = parsed?.hostname
+    const apiKeyId = parsed?.apiKey?.id
+    const apiKeySecret = parsed?.apiKey?.key
+    if (!host || !apiKeyId || !apiKeySecret) return null
+    return { host, apiKeyId, apiKeySecret, source: 'viam' }
   } catch {
     return null
   }
@@ -46,13 +55,17 @@ function fromEnvFile(): MachineTarget | null {
   const apiKeyId = import.meta.env.VITE_API_KEY_ID
   const apiKeySecret = import.meta.env.VITE_API_KEY
   if (!host || !apiKeyId || !apiKeySecret) return null
-  return { host, apiKeyId, apiKeySecret, fromEnv: true }
+  return { host, apiKeyId, apiKeySecret, source: 'env' }
 }
 
-/**
- * The machine to connect to: whichever Viam supplied, or the one named in
- * web/.env.local when developing locally. Null when neither is available.
- */
 export function machineTarget(): MachineTarget | null {
-  return fromViam() ?? fromEnvFile()
+  return fromTestingCookies() ?? fromViam() ?? fromEnvFile()
+}
+
+/** What the page looked for, for when it found nothing. */
+export function lookedFor(): string {
+  const parts = window.location.pathname.split('/')
+  return parts.length >= 3 && parts[1] === 'machine'
+    ? `a cookie named "${parts[2]}" for the machine in this URL`
+    : `a /machine/<id>/ path (this page is at "${window.location.pathname}")`
 }
