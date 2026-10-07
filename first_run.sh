@@ -17,6 +17,7 @@ UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
 
 "$UV" venv --python=3.10 .venv --clear
 "$UV" pip install --python .venv/bin/python -r requirements.txt
+"$UV" pip install --python .venv/bin/python --no-deps -r requirements-nodeps.txt
 
 # Models are fetched rather than committed; see fetch_models.sh.
 bash ./fetch_models.sh

@@ -484,12 +484,24 @@ def image_bytes_to_polylines(
     depth_bytes: bytes = None,
     max_depth_mm: float = 1500.0,
     min_depth_mm: float = 0.0,
+    style: str = "lines",
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if img is None:
         raise ValueError("could not decode image bytes")
+
+    if style == "sketch":
+        # Imported here so the default style never pays for MediaPipe at startup.
+        import sketch_style
+        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img)
+        if auto_rotate:
+            rotate = _rotation_for_paper(crop_w, crop_h, paper_width_mm, paper_height_mm)
+        mm = polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
+        return sketch_style.simplify_and_order(mm)
+    if style != "lines":
+        raise ValueError(f"style must be 'lines' or 'sketch' (got {style!r})")
 
     depth = decode_depth(depth_bytes) if depth_bytes else None
     if depth is not None and depth.shape != img.shape[:2]:
@@ -546,6 +558,8 @@ def main() -> int:
     p.add_argument("--min-len", type=int, default=36)
     p.add_argument("--smooth", type=float, default=2.0)
     p.add_argument("--min-dist", type=float, default=3.0)
+    p.add_argument("--style", choices=["lines", "sketch"], default="lines",
+                   help="lines: trace the photo directly; sketch: cartoonize, then a cleaned-up hand-sketch look")
     args = p.parse_args()
 
     image_bytes = sys.stdin.buffer.read()
@@ -579,6 +593,7 @@ def main() -> int:
             crop_below=args.crop_below,
             crop_sides=args.crop_sides,
             auto_rotate=args.auto_rotate,
+            style=args.style,
         )
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
