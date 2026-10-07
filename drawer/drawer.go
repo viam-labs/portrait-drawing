@@ -45,7 +45,8 @@ func init() {
 type Config struct {
 	Arm string `json:"arm"`
 	// PaperTopLeftCorner is the tool pose the arm holds when the pen tip
-	// touches the paper's top-left corner. Orientation is reused for every
+	// touches the paper's top-left corner: smallest X, largest Y, since the
+	// page runs +X across and -Y down. Orientation is reused for every
 	// waypoint so the pen keeps the same attitude across the whole drawing.
 	PaperTopLeftCorner *poseConfig `json:"paper_top_left_corner"`
 	PaperWidthMM       float64     `json:"paper_width_mm"`
@@ -842,19 +843,27 @@ type waypoint struct {
 	label        string
 }
 
+// paperToWorld maps paper-local mm (x right, y down) onto the table: paper +x
+// along world +X, paper +y along world -Y. With Z up, that keeps the drawing's
+// handedness, so it reads the right way round from above; mapping +y to +Y
+// would draw every image mirrored.
+func paperToWorld(corner r3.Vector, p [2]float64) (float64, float64) {
+	return corner.X + p[0], corner.Y - p[1]
+}
+
 func drawWaypoints(polylines []Polyline, corner r3.Vector, zUp, zDown float64) []waypoint {
 	var out []waypoint
 	for i, poly := range polylines {
-		sx, sy := corner.X+poly[0][0], corner.Y+poly[0][1]
+		sx, sy := paperToWorld(corner, poly[0])
 		out = append(out,
 			waypoint{x: sx, y: sy, z: zUp, label: fmt.Sprintf("polyline %d approach", i)},
 			waypoint{x: sx, y: sy, z: zDown, linear: true, label: fmt.Sprintf("polyline %d pen-down", i)},
 		)
 		for j := 1; j < len(poly); j++ {
-			px, py := corner.X+poly[j][0], corner.Y+poly[j][1]
+			px, py := paperToWorld(corner, poly[j])
 			out = append(out, waypoint{x: px, y: py, z: zDown, linear: true, label: fmt.Sprintf("polyline %d point %d", i, j)})
 		}
-		lx, ly := corner.X+poly[len(poly)-1][0], corner.Y+poly[len(poly)-1][1]
+		lx, ly := paperToWorld(corner, poly[len(poly)-1])
 		out = append(out, waypoint{
 			x: lx, y: ly, z: zUp, linear: true, endsPolyline: true,
 			label: fmt.Sprintf("polyline %d pen-up", i),

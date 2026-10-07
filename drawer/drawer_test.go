@@ -517,12 +517,22 @@ func TestDrawWaypoints_offsetsFromPaperCorner(t *testing.T) {
 
 	test.That(t, wps[1].label, test.ShouldEqual, "polyline 0 pen-down")
 	test.That(t, wps[1].x, test.ShouldEqual, 103.0)
-	test.That(t, wps[1].y, test.ShouldEqual, 207.0)
+	test.That(t, wps[1].y, test.ShouldEqual, 193.0)
 	test.That(t, wps[1].z, test.ShouldEqual, 50.0)
 
 	test.That(t, wps[2].label, test.ShouldEqual, "polyline 0 point 1")
 	test.That(t, wps[2].x, test.ShouldEqual, 111.0)
-	test.That(t, wps[2].y, test.ShouldEqual, 213.0)
+	test.That(t, wps[2].y, test.ShouldEqual, 187.0)
+}
+
+// Right then down on the page is a clockwise turn as you look at it. Seen from
+// above with Z up, clockwise means a negative Z cross product; positive would
+// mean the drawing comes out mirrored.
+func TestDrawWaypoints_keepsHandednessFromAbove(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 10}}}, r3.Vector{}, 5, 0)
+	a, b, c := wps[1], wps[2], wps[3]
+	cross := (b.x-a.x)*(c.y-b.y) - (b.y-a.y)*(c.x-b.x)
+	test.That(t, cross, test.ShouldBeLessThan, 0)
 }
 
 func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
@@ -530,7 +540,7 @@ func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
 	last := wps[len(wps)-1]
 	test.That(t, last.label, test.ShouldEqual, "polyline 0 pen-up")
 	test.That(t, last.x, test.ShouldEqual, 10.0)
-	test.That(t, last.y, test.ShouldEqual, 20.0)
+	test.That(t, last.y, test.ShouldEqual, -20.0)
 	test.That(t, last.z, test.ShouldEqual, 5.0)
 }
 

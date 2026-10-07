@@ -37,7 +37,7 @@ DoCommand, no image data passing through your hands.
 | Attribute | Type | Required | Description |
 |---|---|---|---|
 | `arm` | string | **yes** | The arm that holds the pen. |
-| `paper_top_left_corner` | pose | **yes** | The tool pose where the pen tip touches the paper's top-left corner. Its orientation is reused for every waypoint, so the pen keeps one attitude across the drawing. |
+| `paper_top_left_corner` | pose | **yes** | The tool pose where the pen tip touches the paper's top-left corner. Its orientation is reused for every waypoint, so the pen keeps one attitude across the drawing. See [Which corner is top-left](#which-corner-is-top-left). |
 | `paper_width_mm` | number | **yes** | Paper width. |
 | `paper_height_mm` | number | **yes** | Paper height. |
 | `lift_off_z_mm` | number | no | How far the pen lifts between strokes. Defaults to 5. |
@@ -48,6 +48,18 @@ DoCommand, no image data passing through your hands.
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
 | `allowed_collisions` | array | no | Frame pairs the planner should not treat as a collision. See [Anything bolted to the arm](#anything-bolted-to-the-arm). |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
+
+### Which corner is top-left
+
+The page lies with its width along the arm's **+X** axis and its height running
+toward **−Y**. So the top-left corner is the one with the **smallest X and the
+largest Y** of the sheet; the drawing extends `paper_width_mm` in +X and
+`paper_height_mm` in −Y from it. That orientation keeps the drawing the right way
+round when seen from above.
+
+Earlier versions ran the height toward +Y, which drew every image mirrored. A config
+taught for that older mapping names the corner with the smallest X and smallest Y;
+re-teach it, or add `paper_height_mm` to its Y, which is the same sheet.
 
 ### Anything bolted to the arm
 
