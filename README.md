@@ -38,6 +38,7 @@ DoCommand, no image data passing through your hands.
 |---|---|---|---|
 | `arm` | string | **yes** | The arm that holds the pen. |
 | `paper_top_left_corner` | pose | **yes** | The tool pose where the pen tip touches the paper's top-left corner. Its orientation is reused for every waypoint, so the pen keeps one attitude across the drawing. See [Which corner is top-left](#which-corner-is-top-left). |
+| `paper_top_right_corner` | position | no | Where the pen tip touches the paper's top-right corner, as `{"x", "y", "z"}`. Sets which way the page reads; see [Which corner is top-left](#which-corner-is-top-left). |
 | `paper_width_mm` | number | **yes** | Paper width. |
 | `paper_height_mm` | number | **yes** | Paper height. |
 | `lift_off_z_mm` | number | no | How far the pen lifts between strokes. Defaults to 5. |
@@ -51,11 +52,22 @@ DoCommand, no image data passing through your hands.
 
 ### Which corner is top-left
 
-The page lies with its width along the arm's **+X** axis and its height running
-toward **−Y**. So the top-left corner is the one with the **smallest X and the
-largest Y** of the sheet; the drawing extends `paper_width_mm` in +X and
-`paper_height_mm` in −Y from it. That orientation keeps the drawing the right way
-round when seen from above.
+"Top-left" means top-left **as the person reading the page sees it**, and that
+depends on where they stand. Teach both top corners so the drawer knows:
+
+```json
+"paper_top_left_corner": { "translation": { "x": 159.7, "y": -128.5, "z": 288.5 }, "orientation": { … } },
+"paper_top_right_corner": { "x": 159.7, "y": 150.9, "z": 288.5 }
+```
+
+The page runs from the top-left corner toward the top-right one, and down the page
+is that direction turned 90° clockwise seen from above. Any reading direction, and a
+sheet taped slightly askew, comes out upright and the right way round. The drawer
+warns if the taught top edge differs from `paper_width_mm` by more than 5 mm, which
+usually means a corner was taught in the wrong place.
+
+Without `paper_top_right_corner` the page runs along the arm's **+X** axis and down
+toward **−Y**, so top-left is the sheet's smallest-X, largest-Y corner.
 
 Earlier versions ran the height toward +Y, which drew every image mirrored. A config
 taught for that older mapping names the corner with the smallest X and smallest Y;

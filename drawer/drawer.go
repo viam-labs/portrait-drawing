@@ -49,9 +49,13 @@ type Config struct {
 	// page runs +X across and -Y down. Orientation is reused for every
 	// waypoint so the pen keeps the same attitude across the whole drawing.
 	PaperTopLeftCorner *poseConfig `json:"paper_top_left_corner"`
-	PaperWidthMM       float64     `json:"paper_width_mm"`
-	PaperHeightMM      float64     `json:"paper_height_mm"`
-	LiftOffZMM         float64     `json:"lift_off_z_mm,omitempty"`
+	// PaperTopRightCorner, when set, is where the pen touches the top-right
+	// corner. The page then runs from top-left toward it, so the sheet can face
+	// whichever way its reader stands. Unset keeps the page along +X.
+	PaperTopRightCorner *r3.Vector `json:"paper_top_right_corner,omitempty"`
+	PaperWidthMM        float64    `json:"paper_width_mm"`
+	PaperHeightMM       float64    `json:"paper_height_mm"`
+	LiftOffZMM          float64    `json:"lift_off_z_mm,omitempty"`
 	// HomePose, if set, is the tool pose the arm rests at between drawings.
 	// CapturePose takes precedence over it when both are set.
 	HomePose *poseConfig `json:"home_pose,omitempty"`
@@ -105,6 +109,12 @@ const (
 	// progressStepPercent throttles progress logging by fraction of the
 	// drawing done, so the line count does not scale with stroke count.
 	progressStepPercent = 25
+	// minTopEdgeMM rejects two taught corners so close that the page direction
+	// between them is mostly measurement noise.
+	minTopEdgeMM = 10
+	// topEdgeWarnMM is how far the taught top edge may differ from
+	// paper_width_mm before the drawer warns that a corner may be wrong.
+	topEdgeWarnMM = 5
 )
 
 // Validate returns implicit dependencies and any config errors.
@@ -120,6 +130,13 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.PaperWidthMM <= 0 {
 		return nil, nil, fmt.Errorf("paper_width_mm must be > 0, got %g", cfg.PaperWidthMM)
+	}
+	if cfg.PaperTopRightCorner != nil {
+		if d := topEdgeLength(cfg.PaperTopLeftCorner.Translation, *cfg.PaperTopRightCorner); d < minTopEdgeMM {
+			return nil, nil, fmt.Errorf(
+				"paper_top_right_corner is %.1f mm from paper_top_left_corner in X/Y; teach two distinct corners (at least %g mm apart)",
+				d, float64(minTopEdgeMM))
+		}
 	}
 	if cfg.PaperHeightMM <= 0 {
 		return nil, nil, fmt.Errorf("paper_height_mm must be > 0, got %g", cfg.PaperHeightMM)
@@ -161,7 +178,9 @@ type drawer struct {
 	resource.AlwaysRebuild
 	resource.TriviallyCloseable
 
-	name               resource.Name
+	name resource.Name
+	// pageAcross is the unit world direction of the page's +x (left to right).
+	pageAcross         r3.Vector
 	logger             logging.Logger
 	cfg                *Config
 	arm                arm.Arm
@@ -335,7 +354,17 @@ func newDrawer(
 			return nil, fmt.Errorf("drawer: get capture_pose dep %q: %w", cfg.CapturePose, err)
 		}
 	}
+	pageAcross := r3.Vector{X: 1}
+	if cfg.PaperTopRightCorner != nil {
+		corner := cfg.PaperTopLeftCorner.Translation
+		edge := r3.Vector{X: cfg.PaperTopRightCorner.X - corner.X, Y: cfg.PaperTopRightCorner.Y - corner.Y}
+		pageAcross = edge.Normalize()
+		if l := edge.Norm(); math.Abs(l-cfg.PaperWidthMM) > topEdgeWarnMM {
+			logger.Warnf("drawer: taught top edge is %.1f mm but paper_width_mm is %g; check both corners", l, cfg.PaperWidthMM)
+		}
+	}
 	return &drawer{
+		pageAcross:         pageAcross,
 		name:               conf.ResourceName(),
 		logger:             logger,
 		cfg:                cfg,
@@ -843,27 +872,32 @@ type waypoint struct {
 	label        string
 }
 
-// paperToWorld maps paper-local mm (x right, y down) onto the table: paper +x
-// along world +X, paper +y along world -Y. With Z up, that keeps the drawing's
-// handedness, so it reads the right way round from above; mapping +y to +Y
-// would draw every image mirrored.
-func paperToWorld(corner r3.Vector, p [2]float64) (float64, float64) {
-	return corner.X + p[0], corner.Y - p[1]
+func topEdgeLength(left, right r3.Vector) float64 {
+	return math.Hypot(right.X-left.X, right.Y-left.Y)
 }
 
-func drawWaypoints(polylines []Polyline, corner r3.Vector, zUp, zDown float64) []waypoint {
+// paperToWorld maps paper-local mm (x right, y down) onto the table: +x along
+// across, +y along across turned 90° clockwise seen from above. With Z up that
+// keeps the drawing's handedness, so it reads the right way round rather than
+// mirrored.
+func paperToWorld(corner, across r3.Vector, p [2]float64) (float64, float64) {
+	down := r3.Vector{X: across.Y, Y: -across.X}
+	return corner.X + p[0]*across.X + p[1]*down.X, corner.Y + p[0]*across.Y + p[1]*down.Y
+}
+
+func drawWaypoints(polylines []Polyline, corner, across r3.Vector, zUp, zDown float64) []waypoint {
 	var out []waypoint
 	for i, poly := range polylines {
-		sx, sy := paperToWorld(corner, poly[0])
+		sx, sy := paperToWorld(corner, across, poly[0])
 		out = append(out,
 			waypoint{x: sx, y: sy, z: zUp, label: fmt.Sprintf("polyline %d approach", i)},
 			waypoint{x: sx, y: sy, z: zDown, linear: true, label: fmt.Sprintf("polyline %d pen-down", i)},
 		)
 		for j := 1; j < len(poly); j++ {
-			px, py := paperToWorld(corner, poly[j])
+			px, py := paperToWorld(corner, across, poly[j])
 			out = append(out, waypoint{x: px, y: py, z: zDown, linear: true, label: fmt.Sprintf("polyline %d point %d", i, j)})
 		}
-		lx, ly := paperToWorld(corner, poly[len(poly)-1])
+		lx, ly := paperToWorld(corner, across, poly[len(poly)-1])
 		out = append(out, waypoint{
 			x: lx, y: ly, z: zUp, linear: true, endsPolyline: true,
 			label: fmt.Sprintf("polyline %d pen-up", i),
@@ -892,7 +926,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 	startedAt := time.Now()
 	drawn, nextProgress := 0, progressStepPercent
 
-	for _, wp := range drawWaypoints(polylines, corner, zUp, zDown) {
+	for _, wp := range drawWaypoints(polylines, corner, d.pageAcross, zUp, zDown) {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
