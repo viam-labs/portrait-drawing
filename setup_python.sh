@@ -36,3 +36,6 @@ echo "Virtualenv found/created. Installing/upgrading Python packages..."
 if ! $UV pip install -r requirements.txt -Uqq; then
     exit 1
 fi
+if ! $UV pip install --no-deps -r requirements-nodeps.txt -Uqq; then
+    exit 1
+fi

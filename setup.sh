@@ -1,12 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
+# libegl1 and libgles2: MediaPipe (the stroke-generator's sketch style) loads
+# OpenGL ES at import even when it runs on the CPU, and headless machines and
+# CI runners do not have it.
 OS="$(uname -s)"
 if [[ "$OS" == "Linux" ]]; then
     sudo apt-get update
     sudo apt-get install -y --no-install-recommends \
         ca-certificates \
-        libnlopt-dev
+        libnlopt-dev \
+        libegl1 \
+        libgles2
 elif [[ "$OS" == "Darwin" ]]; then
     brew tap viamrobotics/brews
     brew install nlopt-static

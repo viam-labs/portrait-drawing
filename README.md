@@ -266,6 +266,7 @@ Every attribute is optional; the defaults are tuned for portraits.
 
 | Attribute | Type | Description |
 |---|---|---|
+| `style` | string | `lines` (default) traces the photo directly. `sketch` draws a cleaner, hand-sketched portrait — see [The sketch style](#the-sketch-style). The attributes below tune `lines` only. |
 | `size` | int | Long side, in pixels, the model sees. Larger recovers finer features — lashes, nostrils — at a roughly linear cost in strokes. Default `768`. |
 | `clahe` | number | Local contrast lift before the model runs. Default `2.0`; `0` disables. |
 | `sigma` | number | Smoothing of the model response before ridges are traced. Default `2.2`. |
@@ -317,6 +318,34 @@ properties of the rig, so they are set once and left alone.
 Pixels with no depth reading are excluded rather than treated as near — a
 dropout is unknown, not close.
 
+### The sketch style
+
+`"style": "sketch"` draws a portrait the way a person would sketch it rather than
+tracing every edge in the photo. Faces traced directly pick up skin texture and
+lighting, which reads as wrinkles and stubble on paper; this style was tuned against
+real lobby photos and hand tracings to avoid that.
+
+- **The face is cropped and cartoonized first** (AnimeGAN `face_paint`), which smooths
+  skin and evens out lighting. Lines are then extracted from the cartoon with the same
+  line model `lines` uses, so the nose, cheekbones and mouth area keep the person's
+  actual shapes.
+- **Short fragments are held to a stricter minimum where they read as clutter**:
+  under the eyes, which otherwise looks tired, and on clothing patterns. Parallel
+  dashes along one lock of straight hair are thinned to the longest.
+- **Eyes, lips, brows, glasses, a cap and its lettering, and facial hair are drawn
+  from MediaPipe face landmarks and segmentation**, because extracted lines get
+  exactly those wrong in ways people notice first. Curly hair and full beards keep the
+  extracted short strokes, which carry their texture.
+- **Strokes are simplified to what a pen can resolve and ordered nearest-first** to
+  keep pen-up travel short. Nothing is dropped to save drawing time.
+- **It needs a face.** A photo where MediaPipe finds none fails with
+  `sketch style: no face found in the photo` rather than drawing the room.
+- **It costs more**: a few seconds per photo on a laptop, and about 28 MB of extra
+  models that `first_run.sh` downloads. A failed download disables only this style.
+
+The `lines` tuning attributes, `isolate_subject` and the depth band do not apply to
+`sketch`; it does its own cropping and segmentation.
+
 ### `generate`
 
 ```json
@@ -338,6 +367,11 @@ drawer's `draw` verb accepts.
 The line-drawing model is from
 [Learning to Generate Line Drawings that Convey Geometry and Semantics](https://carolineec.github.io/informative_drawings/)
 (Chan, Durand, Isola — CVPR 2022), used under the MIT licence.
+
+The sketch style also uses the AnimeGANv2 `face_paint_512_v2` model
+([bryandlee/animegan2-pytorch](https://github.com/bryandlee/animegan2-pytorch), MIT) and
+MediaPipe's face landmarker and selfie multiclass segmenter
+([google-ai-edge/mediapipe](https://github.com/google-ai-edge/mediapipe), Apache 2.0).
 
 ## Setting up the capture loop
 

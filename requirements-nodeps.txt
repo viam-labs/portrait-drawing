@@ -1,0 +1,6 @@
+# Installed with --no-deps. MediaPipe declares the GUI build of OpenCV
+# (opencv-contrib-python), which would install a second cv2 on top of the
+# headless one in requirements.txt and needs display libraries a server lacks.
+# Its remaining runtime dependencies are listed in requirements.txt.
+# 0.10.33 specifically: 1.0.x aborts on macOS arm64, 0.10.35 ships telemetry.
+mediapipe==0.10.33
