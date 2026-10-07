@@ -254,3 +254,25 @@ func TestParseGenerateArgs_depthCarried(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, got.DepthB64, test.ShouldNotBeEmpty)
 }
+
+func TestConfigValidate_style(t *testing.T) {
+	for _, style := range []string{"", "lines", "sketch"} {
+		_, _, err := (&Config{Style: style}).Validate("")
+		test.That(t, err, test.ShouldBeNil)
+	}
+	_, _, err := (&Config{Style: "cartoon"}).Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "style")
+}
+
+func TestBuildCLIArgs_styleOmittedWhenUnset(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{}}
+	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldNotContainSubstring, "--style")
+}
+
+func TestBuildCLIArgs_stylePassedThrough(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{Style: "sketch"}}
+	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldContainSubstring, "--style sketch")
+}

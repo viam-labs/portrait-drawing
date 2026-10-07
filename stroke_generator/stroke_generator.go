@@ -35,6 +35,12 @@ func init() {
 // image-processing pipeline; per-call paper geometry lives in the
 // generate DoCommand payload.
 type Config struct {
+	// Style picks the pipeline. "lines" (the default) traces the photo
+	// directly. "sketch" cartoonizes the face first and draws a cleaned-up
+	// hand-sketch look, with eyes, lips, brows, glasses and facial hair drawn
+	// from face landmarks; the tuning knobs below apply to "lines" only.
+	Style string `json:"style,omitempty"`
+
 	// Pointer knobs are nil-as-omitted so the Python pipeline's own default
 	// applies; an explicit 0 is honoured.
 
@@ -79,6 +85,11 @@ type Config struct {
 }
 
 const (
+	styleLines  = "lines"
+	styleSketch = "sketch"
+)
+
+const (
 	defaultPrune   = 20
 	defaultMinLen  = 36
 	defaultSmooth  = 2.0
@@ -88,6 +99,11 @@ const (
 
 // Validate returns implicit dependencies and any config errors.
 func (cfg *Config) Validate(_ string) ([]string, []string, error) {
+	switch cfg.Style {
+	case "", styleLines, styleSketch:
+	default:
+		return nil, nil, fmt.Errorf("style must be %q or %q, got %q", styleLines, styleSketch, cfg.Style)
+	}
 	for name, v := range map[string]*float64{
 		"clahe":        cfg.Clahe,
 		"sigma":        cfg.Sigma,
@@ -242,6 +258,9 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 		"--min-len", strconv.Itoa(s.cfg.MinLen),
 		"--smooth", strconv.FormatFloat(s.cfg.Smooth, 'f', -1, 64),
 		"--min-dist", strconv.FormatFloat(s.cfg.MinDist, 'f', -1, 64),
+	}
+	if s.cfg.Style != "" {
+		args = append(args, "--style", s.cfg.Style)
 	}
 	if s.cfg.Size != nil {
 		args = append(args, "--size", strconv.Itoa(*s.cfg.Size))

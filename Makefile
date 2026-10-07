@@ -42,7 +42,7 @@ python-test:
 	.venv/bin/pytest python/ -v
 
 module.tar.gz: build web
-	tar czf module.tar.gz $(BIN_DIR)/$(BINARY) meta.json first_run.sh fetch_models.sh setup.sh setup_python.sh python requirements.txt web/dist
+	tar czf module.tar.gz $(BIN_DIR)/$(BINARY) meta.json first_run.sh fetch_models.sh setup.sh setup_python.sh python requirements.txt requirements-nodeps.txt web/dist
 	@echo "Created module.tar.gz"
 
 clean:
