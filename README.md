@@ -241,6 +241,21 @@ no longer holds the job itself:
 {"draw": {"polylines": [...], "start_at": 37}}
 ```
 
+`paper` draws on another surface instead of the configured one, for a service
+with its own workspace under this arm. It takes the same fields as the config,
+without the `paper_` prefix:
+
+```json
+{"draw": {"polylines": [...], "paper": {
+  "top_left_corner": {"translation": {…}, "orientation": {…}},
+  "top_right_corner": {"x": 0, "y": 0, "z": 0},
+  "width_mm": 85.9, "height_mm": 59.2
+}}}
+```
+
+This is how the [`text-writer`](#viamportrait-drawingtext-writer) puts a name
+on a card beside the portrait paper.
+
 ### `status`
 
 A drawing runs for minutes with the DoCommand that started it still outstanding,
@@ -433,15 +448,24 @@ drawer's `draw` verb accepts.
 
 Writes a line of text on a card — a name on a name tag — through a drawer. It
 lays the text out as polylines in card-local mm, hands them to the drawer's
-`draw` verb, and returns when the drawer does, pen up. That blocking contract
-is what the reception queue's `name_tag_writer` expects, so this service is the
-one to name there.
+`draw` verb along with where the card is, and returns when the drawer does,
+pen up. That blocking contract is what the reception queue's `name_tag_writer`
+expects, so this service is the one to name there.
+
+The card is the writer's own surface. The drawer's paper stays where portraits
+go; the card sits in a second workspace under the same arm, a feeder's output
+tray say, and the writer carries its corners into every draw.
 
 ### Configuration
 
 ```json
 {
-  "drawer": "tag-drawer",
+  "drawer": "drawer",
+  "paper_top_left_corner": {
+    "translation": { "x": 120, "y": -260, "z": 266 },
+    "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": -1, "th": 0 } }
+  },
+  "paper_top_right_corner": { "x": 120, "y": -174.1, "z": 266 },
   "paper_width_mm": 85.9,
   "paper_height_mm": 59.2
 }
@@ -449,8 +473,10 @@ one to name there.
 
 | Attribute | Type | Required | Description |
 |---|---|---|---|
-| `drawer` | string | **yes** | The `drawer` that holds the pen over the card. |
-| `paper_width_mm`, `paper_height_mm` | number | **yes** | The card, which must match that drawer's paper geometry. |
+| `drawer` | string | **yes** | The `drawer` whose arm writes the card. |
+| `paper_top_left_corner` | pose | **yes** | The tool pose with the pen tip on the card's top-left corner, as its reader sees it. Taught the same way as the drawer's; see [Which corner is top-left](#which-corner-is-top-left). |
+| `paper_top_right_corner` | position | no | Where the pen tip touches the card's top-right corner. Sets which way the text runs; without it the card runs along the arm's +X. |
+| `paper_width_mm`, `paper_height_mm` | number | **yes** | The card. |
 | `fill` | number | no | Fraction of the card the text fills on whichever axis binds first. Default `0.8`. A long name is limited by the card's width, a short one by its height. |
 | `cap_height_mm` | number | no | Fix the capital height instead of filling. Text that would overflow the card at that height is refused rather than drawn off the edge. |
 | `stroke_font` | string | no | A single-stroke [Hershey](https://en.wikipedia.org/wiki/Hershey_fonts) face. Default `cursive`, a joined-up script; `futural` is a plain sans, `rowmans` and `timesr` are seriffed. |
@@ -459,13 +485,11 @@ one to name there.
 | `font` | string | no | TTF family for `outline`. Default tries Helvetica, then its metric-compatible clones. |
 | `spacing_mm` | number | no | Spacing of the points along each stroke. Default `2`. |
 
-The drawer sees a card the way it sees a sheet of paper: teach its
-`paper_top_left_corner` at the card's corner and set its `paper_width_mm` and
-`paper_height_mm` to the card. A machine that draws portraits as well needs a
-second drawer on the same arm for the card; the queue pauses the portrait drawer
-before a tag is written, and both return to the same rest pose if they share a
-`capture_pose`. Nothing moves the card into place: the geometry assumes the next
-card is wherever the last one was, which is what a card feeder provides.
+One drawer serves both surfaces. The queue pauses a portrait before a tag is
+written, the writer draws on the card through the same drawer, and the drawer
+returns to its rest pose after each. Nothing moves the card into place: the
+geometry assumes the next card is wherever the last one was, which is what a
+card feeder provides.
 
 Sizing is in the writer's hands rather than the caller's because the card is
 fixed and the names are not: with `fill`, "Ada Lovelace" and "Al" each take as

@@ -11,10 +11,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
 
+	"github.com/viam-labs/portrait-drawing/drawer"
 	"github.com/viam-labs/portrait-drawing/internal/verb"
 	"github.com/viam-labs/portrait-drawing/pyrunner"
 )
@@ -30,12 +32,22 @@ func init() {
 	)
 }
 
-// Config is the text-writer service configuration. Paper geometry must match
-// the drawer's, since the polylines are laid out on it.
+// Config is the text-writer service configuration. The card is its own
+// surface, taught the same way as the drawer's paper, and is sent along with
+// every draw so the drawer's arm writes here while its own paper stays where
+// portraits go.
 type Config struct {
-	Drawer        string  `json:"drawer"`
-	PaperWidthMM  float64 `json:"paper_width_mm"`
-	PaperHeightMM float64 `json:"paper_height_mm"`
+	Drawer string `json:"drawer"`
+	// PaperTopLeftCorner is the tool pose with the pen tip on the card's
+	// top-left corner, as its reader sees it. Its orientation is held for the
+	// whole drawing.
+	PaperTopLeftCorner *drawer.PoseConfig `json:"paper_top_left_corner"`
+	// PaperTopRightCorner, when set, is where the pen touches the card's
+	// top-right corner, which fixes which way the text runs. Unset keeps the
+	// card along the arm's +X.
+	PaperTopRightCorner *r3.Vector `json:"paper_top_right_corner,omitempty"`
+	PaperWidthMM        float64    `json:"paper_width_mm"`
+	PaperHeightMM       float64    `json:"paper_height_mm"`
 	// Fill is the fraction of the card the text fills on whichever axis binds
 	// first, when no cap height is given. Default 0.8.
 	Fill float64 `json:"fill,omitempty"`
@@ -60,11 +72,8 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.Drawer == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "drawer")
 	}
-	if cfg.PaperWidthMM <= 0 {
-		return nil, nil, fmt.Errorf("paper_width_mm must be > 0, got %g", cfg.PaperWidthMM)
-	}
-	if cfg.PaperHeightMM <= 0 {
-		return nil, nil, fmt.Errorf("paper_height_mm must be > 0, got %g", cfg.PaperHeightMM)
+	if err := cfg.paper().Validate(path, "paper_"); err != nil {
+		return nil, nil, err
 	}
 	if cfg.Fill < 0 || cfg.Fill > 1 {
 		return nil, nil, fmt.Errorf("fill must be in (0, 1], got %g", cfg.Fill)
@@ -79,6 +88,43 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		return nil, nil, errors.New("outline and stroke_font are exclusive")
 	}
 	return []string{cfg.Drawer}, nil, nil
+}
+
+func (cfg *Config) paper() *drawer.Paper {
+	return &drawer.Paper{
+		TopLeftCorner:  cfg.PaperTopLeftCorner,
+		TopRightCorner: cfg.PaperTopRightCorner,
+		WidthMM:        cfg.PaperWidthMM,
+		HeightMM:       cfg.PaperHeightMM,
+	}
+}
+
+// paperPayload is the card as a plain map, which is what a DoCommand carries.
+// Built by hand because r3.Vector has no JSON tags and would come out as X/Y/Z.
+func (cfg *Config) paperPayload() (map[string]interface{}, error) {
+	vec := func(v r3.Vector) map[string]interface{} {
+		return map[string]interface{}{"x": v.X, "y": v.Y, "z": v.Z}
+	}
+	raw, err := json.Marshal(cfg.PaperTopLeftCorner.Orientation)
+	if err != nil {
+		return nil, err
+	}
+	var orientation map[string]interface{}
+	if err := json.Unmarshal(raw, &orientation); err != nil {
+		return nil, err
+	}
+	out := map[string]interface{}{
+		"top_left_corner": map[string]interface{}{
+			"translation": vec(cfg.PaperTopLeftCorner.Translation),
+			"orientation": orientation,
+		},
+		"width_mm":  cfg.PaperWidthMM,
+		"height_mm": cfg.PaperHeightMM,
+	}
+	if cfg.PaperTopRightCorner != nil {
+		out["top_right_corner"] = vec(*cfg.PaperTopRightCorner)
+	}
+	return out, nil
 }
 
 type commander interface {
@@ -242,9 +288,13 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 	delete(layout, "polylines")
 	layout["polylines_total"] = len(polylines)
 
+	paper, err := w.cfg.paperPayload()
+	if err != nil {
+		return nil, fmt.Errorf("text-writer: %w", err)
+	}
 	w.logger.Infof("text-writer: writing %q, %d strokes", a.Text, len(polylines))
 	resp, err := w.drawer.DoCommand(ctx, map[string]interface{}{
-		"draw": map[string]interface{}{"polylines": polylines},
+		"draw": map[string]interface{}{"polylines": polylines, "paper": paper},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: draw %q: %w", a.Text, err)
