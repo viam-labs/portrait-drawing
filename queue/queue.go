@@ -52,6 +52,11 @@ const (
 	defaultPaperHeightMM = 152.4
 	defaultMarginMM      = 8.0
 
+	// interruptedTag is the error an interrupted name tag is failed with: a
+	// name cannot resume mid-letter, and writing it again would go over the
+	// partly written card.
+	interruptedTag = "interrupted while writing; the card may be partly written, so replace it before retry_job"
+
 	// progressPoll is how often an active portrait's progress is saved, so a
 	// restart resumes close to where the pen stopped.
 	progressPoll = 2 * time.Second
@@ -153,6 +158,9 @@ type receptionQueue struct {
 	// portrait in progress because a name tag is waiting.
 	wake    chan struct{}
 	preempt chan struct{}
+
+	// cancelTag stops the name tag being written, so cancel_job can stop it.
+	cancelTag context.CancelFunc
 
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
@@ -395,8 +403,12 @@ func (q *receptionQueue) cancelJob(ctx context.Context, id string) (map[string]i
 	}
 	job.State, job.FinishedAt = stateCanceled, time.Now()
 	err := q.saveLocked()
+	cancelTag := q.cancelTag
 	q.mu.Unlock()
-	if wasActive && job.Kind == kindPortrait {
+	if wasActive && job.Kind == kindNameTag && cancelTag != nil {
+		cancelTag()
+	}
+	if wasActive {
 		if _, cerr := q.drawer.DoCommand(ctx, map[string]interface{}{"cancel": map[string]interface{}{}}); cerr != nil {
 			q.logger.Warnf("reception-queue: cancel drawer: %v", cerr)
 		}
@@ -588,10 +600,20 @@ func (q *receptionQueue) finish(job *Job, state string, err error) {
 
 func (q *receptionQueue) runNameTag(ctx context.Context, job *Job) {
 	q.logger.Infof("reception-queue: writing name tag %s", job.ID)
-	_, err := q.writer.DoCommand(ctx, fillName(q.nameTagCommand, job.Name).(map[string]interface{}))
+	tagCtx, cancel := context.WithCancel(ctx)
+	q.mu.Lock()
+	q.cancelTag = cancel
+	q.mu.Unlock()
+	defer func() {
+		q.mu.Lock()
+		q.cancelTag = nil
+		q.mu.Unlock()
+		cancel()
+	}()
+	_, err := q.writer.DoCommand(tagCtx, fillName(q.nameTagCommand, job.Name).(map[string]interface{}))
 	switch {
-	case ctx.Err() != nil:
-		q.finish(job, stateQueued, nil)
+	case tagCtx.Err() != nil:
+		q.finish(job, stateFailed, errors.New(interruptedTag))
 	case err != nil:
 		q.logger.Warnf("reception-queue: name tag %s failed: %v", job.ID, err)
 		q.finish(job, stateFailed, err)
@@ -626,14 +648,19 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 
 	ticker := time.NewTicker(progressPoll)
 	defer ticker.Stop()
-	pausing := false
+	var paused chan struct{}
 	for {
 		select {
 		case r := <-done:
+			// A pause sent as the portrait finished on its own must land before
+			// the next job starts, or it would stop that job instead.
+			if paused != nil {
+				<-paused
+			}
 			q.portraitReturned(ctx, job, r.resp, r.err)
 			return
 		case <-q.preempt:
-			if pausing {
+			if paused != nil {
 				continue
 			}
 			q.mu.Lock()
@@ -642,9 +669,10 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 			if !waiting {
 				continue
 			}
-			pausing = true
+			paused = make(chan struct{})
 			q.logger.Infof("reception-queue: pausing portrait %s for a name tag", job.ID)
 			go func() {
+				defer close(paused)
 				if _, err := q.drawer.DoCommand(ctx, map[string]interface{}{"pause": map[string]interface{}{}}); err != nil {
 					q.logger.Warnf("reception-queue: pause drawer: %v", err)
 				}
@@ -716,12 +744,12 @@ func (q *receptionQueue) load() error {
 		if j.Total == 0 {
 			j.Total = len(j.Polylines)
 		}
-		// Whatever was running when the module stopped resumes rather than restarts.
+		// A portrait interrupted by a stop resumes; a name tag cannot, so it waits for a person.
 		if j.State == stateActive {
 			if j.Kind == kindPortrait {
 				j.State = statePaused
 			} else {
-				j.State = stateQueued
+				j.State, j.Error, j.FinishedAt = stateFailed, interruptedTag, time.Now()
 			}
 		}
 	}

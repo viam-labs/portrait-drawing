@@ -476,7 +476,10 @@ order; the drawer and the name-tag writer each just do one job when asked.
   an active portrait's progress every couple of seconds, so after a restart it
   resumes within a stroke or two of where the pen stopped.
 - **Failures wait for a person.** A failed job stays `failed` with its error, and
-  `retry_job` puts it back — a portrait from the stroke it stopped at.
+  `retry_job` puts it back — a portrait from the stroke it stopped at, a name tag
+  from the start. A name tag can't resume mid-letter, so one interrupted by a
+  restart is failed rather than rewritten over the partly written card; replace
+  the card before retrying it.
 
 ### DoCommand
 
@@ -486,7 +489,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
 | `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
 | `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits |
-| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait is stopped |
+| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or name tag is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
 
 `visitor` is stored with the job and returned in summaries, for whatever tells the
