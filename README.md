@@ -437,6 +437,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
 {
   "drawer": "drawer",
   "stroke_generator": "stroke-generator",
+  "photo": "visitor-photo",
   "name_tag_writer": "font-writer",
   "name_tag_command": { "write": { "text": "{name}", "cap_height_mm": 12 } },
   "paper_width_mm": 101.6,
@@ -449,6 +450,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
 |---|---|---|---|
 | `drawer` | string | **yes** | The `drawer` that draws portraits. |
 | `stroke_generator` | string | **yes** | Turns each portrait photo into strokes when it is queued. |
+| `photo` | string | no | A [frame-buffer](https://github.com/viam-labs/frame-buffer) camera over the visitor-facing webcam. `enqueue_portrait` without `image_b64` draws the frame it holds, then clears it. |
 | `name_tag_writer` | string | no | A service that writes a name tag. Without it, `enqueue_name_tag` is refused. |
 | `name_tag_command` | object | no | The DoCommand sent to `name_tag_writer`; every `{name}` in a string value is replaced with the visitor's name. Default `{"write": {"text": "{name}"}}`. |
 | `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
@@ -465,7 +467,11 @@ order; the drawer and the name-tag writer each just do one job when asked.
   resumes the portrait straight after.
 - **The photo is never stored.** `enqueue_portrait` sends it to the stroke
   generator and keeps only the strokes; strokes are dropped once the portrait is
-  drawn or canceled.
+  drawn or canceled. A photo read from `photo` is cleared off the camera
+  afterwards, even when it is rejected (for example, no face big enough).
+- **Taking the photo is the caller's job.** Call `capture` on the `photo` camera
+  (its `delay_sec` is the countdown), let the visitor review the held frame, and
+  then call `enqueue_portrait`. To retake, just `capture` again.
 - **A restart picks up where it stopped.** Jobs are saved after every change, and
   an active portrait's progress every couple of seconds, so after a restart it
   resumes within a stroke or two of where the pen stopped.
@@ -476,7 +482,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
 
 | Verb | Payload | Returns |
 |---|---|---|
-| `enqueue_portrait` | `{"image_b64": "…", "name": "Ada", "visitor": {…}}` | `{"job_id", "position"}` |
+| `enqueue_portrait` | `{"name": "Ada", "visitor": {…}}`, plus `"image_b64": "…"` to send the photo instead of reading `photo` | `{"job_id", "position"}` |
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
 | `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
 | `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits |

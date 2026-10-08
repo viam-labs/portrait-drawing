@@ -5,6 +5,7 @@ package queue
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,9 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
+	rutils "go.viam.com/rdk/utils"
 
 	"github.com/viam-labs/portrait-drawing/internal/verb"
 )
@@ -63,6 +66,9 @@ type Config struct {
 	// StrokeGenerator turns a portrait photo into polylines when it is queued,
 	// so the photo itself is never stored.
 	StrokeGenerator string `json:"stroke_generator"`
+	// Photo is a frame-buffer camera holding the visitor's photo. enqueue_portrait
+	// without image_b64 reads it, then clears it.
+	Photo string `json:"photo,omitempty"`
 	// NameTagWriter writes name tags. Optional: without it, name tags are
 	// refused at enqueue.
 	NameTagWriter string `json:"name_tag_writer,omitempty"`
@@ -98,6 +104,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		}
 	}
 	deps := []string{cfg.Drawer, cfg.StrokeGenerator}
+	if cfg.Photo != "" {
+		deps = append(deps, cfg.Photo)
+	}
 	if cfg.NameTagWriter != "" {
 		deps = append(deps, cfg.NameTagWriter)
 	}
@@ -131,6 +140,7 @@ type receptionQueue struct {
 	drawer         commander
 	generator      commander
 	writer         commander
+	photo          camera.Camera
 	nameTagCommand map[string]interface{}
 	paperW, paperH float64
 	margin         float64
@@ -175,6 +185,11 @@ func newQueue(ctx context.Context, deps resource.Dependencies, conf resource.Con
 		stateFile = filepath.Join(dir, "reception-queue-"+conf.ResourceName().Name+".json")
 	}
 	q := newWithClients(conf.ResourceName(), logger, drawer, gen, writer, cfg, stateFile)
+	if cfg.Photo != "" {
+		if q.photo, err = camera.FromProvider(deps, cfg.Photo); err != nil {
+			return nil, fmt.Errorf("reception-queue: get photo %q: %w", cfg.Photo, err)
+		}
+	}
 	if err := q.load(); err != nil {
 		return nil, err
 	}
@@ -277,7 +292,14 @@ func visitorOf(args map[string]interface{}) map[string]interface{} {
 func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]interface{}) (map[string]interface{}, error) {
 	image := str(args, "image_b64")
 	if image == "" {
-		return nil, errors.New("reception-queue: enqueue_portrait needs image_b64")
+		if q.photo == nil {
+			return nil, errors.New("reception-queue: enqueue_portrait needs image_b64, or a photo camera configured")
+		}
+		defer q.clearPhoto()
+		var err error
+		if image, err = q.readPhoto(ctx); err != nil {
+			return nil, err
+		}
 	}
 	resp, err := q.generator.DoCommand(ctx, map[string]interface{}{"generate": map[string]interface{}{
 		"image_b64":       image,
@@ -298,6 +320,33 @@ func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]in
 		State: stateQueued, Polylines: polylines, CreatedAt: time.Now(),
 	}
 	return q.add(job)
+}
+
+func (q *receptionQueue) readPhoto(ctx context.Context) (string, error) {
+	images, _, err := q.photo.Images(ctx, nil, nil)
+	if err != nil {
+		return "", fmt.Errorf("reception-queue: read photo: %w", err)
+	}
+	for i := range images {
+		if images[i].MimeType() == rutils.MimeTypeRawDepth {
+			continue
+		}
+		raw, err := images[i].Bytes(ctx)
+		if err != nil {
+			return "", fmt.Errorf("reception-queue: read photo bytes: %w", err)
+		}
+		return base64.StdEncoding.EncodeToString(raw), nil
+	}
+	return "", errors.New("reception-queue: the photo camera holds no picture; capture one first")
+}
+
+// clearPhoto runs even when stroke generation fails, so a rejected photo is not left behind either.
+func (q *receptionQueue) clearPhoto() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := q.photo.DoCommand(ctx, map[string]interface{}{"clear": map[string]interface{}{}}); err != nil {
+		q.logger.Errorf("reception-queue: clear photo; the visitor's photo is still on the camera: %v", err)
+	}
 }
 
 func (q *receptionQueue) enqueueNameTag(args map[string]interface{}) (map[string]interface{}, error) {

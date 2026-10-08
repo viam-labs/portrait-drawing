@@ -2,7 +2,9 @@ package queue
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,9 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/data"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
+	"go.viam.com/rdk/testutils/inject"
+	rutils "go.viam.com/rdk/utils"
 	"go.viam.com/test"
 )
 
@@ -129,10 +135,16 @@ func (w *fakeWriter) DoCommand(_ context.Context, cmd map[string]interface{}) (m
 	return map[string]interface{}{}, nil
 }
 
-type fakeGenerator struct{ lastImage string }
+type fakeGenerator struct {
+	lastImage string
+	fail      error
+}
 
 func (g *fakeGenerator) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	g.lastImage = cmd["generate"].(map[string]interface{})["image_b64"].(string)
+	if g.fail != nil {
+		return nil, g.fail
+	}
 	polylines := []interface{}{}
 	for i := 0; i < 6; i++ {
 		polylines = append(polylines, []interface{}{[]interface{}{float64(i), 0.0}, []interface{}{float64(i), 5.0}})
@@ -385,3 +397,49 @@ func TestConfigValidate(t *testing.T) {
 }
 
 var _ resource.Resource = (*receptionQueue)(nil)
+
+// fakePhoto is a frame-buffer camera: it holds a picture until cleared.
+func fakePhoto(held []byte) (*inject.Camera, *[]byte) {
+	cam := inject.NewCamera("photo")
+	cam.ImagesFunc = func(context.Context, []string, map[string]interface{}) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+		if held == nil {
+			return nil, resource.ResponseMetadata{}, errors.New("frame-buffer: no image")
+		}
+		depth, err := camera.NamedImageFromBytes([]byte("DEPTH"), "depth", rutils.MimeTypeRawDepth, data.Annotations{})
+		if err != nil {
+			return nil, resource.ResponseMetadata{}, err
+		}
+		color, err := camera.NamedImageFromBytes(held, "color", rutils.MimeTypeJPEG, data.Annotations{})
+		return []camera.NamedImage{depth, color}, resource.ResponseMetadata{}, err
+	}
+	cam.DoFunc = func(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+		if _, ok := cmd["clear"]; ok {
+			held = nil
+		}
+		return map[string]interface{}{}, nil
+	}
+	return cam, &held
+}
+
+func TestPortraitFromThePhotoCameraClearsIt(t *testing.T) {
+	h := newHarness(t)
+	cam, held := fakePhoto([]byte("VISITOR"))
+	h.q.photo = cam
+	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"name": "Ada"})
+	test.That(t, h.gen.lastImage, test.ShouldEqual, base64.StdEncoding.EncodeToString([]byte("VISITOR")))
+	test.That(t, *held, test.ShouldBeNil)
+
+	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_portrait": map[string]interface{}{}})
+	test.That(t, err, test.ShouldNotBeNil)
+}
+
+func TestARejectedPhotoIsClearedToo(t *testing.T) {
+	h := newHarness(t)
+	cam, held := fakePhoto([]byte("POSTER"))
+	h.q.photo = cam
+	h.gen.fail = errors.New("face is too small")
+	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_portrait": map[string]interface{}{}})
+	test.That(t, err.Error(), test.ShouldContainSubstring, "face is too small")
+	test.That(t, *held, test.ShouldBeNil)
+	test.That(t, h.q.status()["waiting"], test.ShouldBeEmpty)
+}
