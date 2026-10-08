@@ -425,6 +425,67 @@ The `lines` tuning attributes, `isolate_subject` and the depth band do not apply
 `{"polylines": [[[x, y], …], …]}` in paper-local mm — exactly the shape the
 drawer's `draw` verb accepts.
 
+## `viam:portrait-drawing:reception-queue`
+
+Runs a reception desk's jobs on one arm: name tags, which a visitor needs before
+their host arrives, and portraits, which can wait until they leave. It owns the
+order; the drawer and the name-tag writer each just do one job when asked.
+
+### Configuration
+
+```json
+{
+  "drawer": "drawer",
+  "stroke_generator": "stroke-generator",
+  "name_tag_writer": "font-writer",
+  "name_tag_command": { "write": { "text": "{name}", "cap_height_mm": 12 } },
+  "paper_width_mm": 101.6,
+  "paper_height_mm": 152.4,
+  "margin_mm": 8
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `drawer` | string | **yes** | The `drawer` that draws portraits. |
+| `stroke_generator` | string | **yes** | Turns each portrait photo into strokes when it is queued. |
+| `name_tag_writer` | string | no | A service that writes a name tag. Without it, `enqueue_name_tag` is refused. |
+| `name_tag_command` | object | no | The DoCommand sent to `name_tag_writer`; every `{name}` in a string value is replaced with the visitor's name. Default `{"write": {"text": "{name}"}}`. |
+| `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
+| `state_file` | string | no | Where jobs are saved. Default a file named after the service in `$VIAM_MODULE_DATA`. |
+
+### Behavior and caveats
+
+- **Name tags first.** A waiting name tag always runs before any portrait. If a
+  portrait is drawing when one arrives, the queue `pause`s the drawer — the stroke
+  in progress finishes and the arm returns to rest — writes the tag, and then
+  resumes the portrait from the next stroke.
+- **The name-tag writer must block until it is done.** The queue treats the
+  writer's DoCommand returning as "the tag is finished and the pen is up", and
+  resumes the portrait straight after.
+- **The photo is never stored.** `enqueue_portrait` sends it to the stroke
+  generator and keeps only the strokes; strokes are dropped once the portrait is
+  drawn or canceled.
+- **A restart picks up where it stopped.** Jobs are saved after every change, and
+  an active portrait's progress every couple of seconds, so after a restart it
+  resumes within a stroke or two of where the pen stopped.
+- **Failures wait for a person.** A failed job stays `failed` with its error, and
+  `retry_job` puts it back — a portrait from the stroke it stopped at.
+
+### DoCommand
+
+| Verb | Payload | Returns |
+|---|---|---|
+| `enqueue_portrait` | `{"image_b64": "…", "name": "Ada", "visitor": {…}}` | `{"job_id", "position"}` |
+| `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
+| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
+| `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits |
+| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait is stopped |
+| `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
+
+`visitor` is stored with the job and returned in summaries, for whatever tells the
+visitor their portrait is ready.
+
 ## Credits
 
 The line-drawing model is from

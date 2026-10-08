@@ -16,6 +16,12 @@
       "model": "viam:portrait-drawing:stroke-generator",
       "short_description": "Turns an image into ordered 2D polylines for the drawer.",
       "markdown_link": "README.md"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "viam:portrait-drawing:reception-queue",
+      "short_description": "Runs a reception desk's name tags and portraits on one arm, name tags first.",
+      "markdown_link": "README.md"
     }
   ],
   "applications": [
