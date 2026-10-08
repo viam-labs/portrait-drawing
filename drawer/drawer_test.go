@@ -124,7 +124,7 @@ func TestParseDrawPayload_valid(t *testing.T) {
 			[]interface{}{[]interface{}{20.0, 20.0}},
 		},
 	}
-	got, err := parseDrawPayload(payload)
+	got, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(got), test.ShouldEqual, 2)
 	test.That(t, len(got[0]), test.ShouldEqual, 2)
@@ -134,14 +134,14 @@ func TestParseDrawPayload_valid(t *testing.T) {
 }
 
 func TestParseDrawPayload_missingPolylines(t *testing.T) {
-	_, err := parseDrawPayload(map[string]interface{}{})
+	_, _, err := parseDrawPayload(map[string]interface{}{})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
 }
 
 func TestParseDrawPayload_emptyPolylines(t *testing.T) {
 	payload := map[string]interface{}{"polylines": []interface{}{}}
-	_, err := parseDrawPayload(payload)
+	_, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
 }
@@ -153,7 +153,7 @@ func TestParseDrawPayload_emptyInnerPolyline(t *testing.T) {
 			[]interface{}{},
 		},
 	}
-	_, err := parseDrawPayload(payload)
+	_, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "empty")
 }
@@ -164,7 +164,7 @@ func TestParseDrawPayload_wrongPointArity(t *testing.T) {
 			[]interface{}{[]interface{}{0.0, 0.0, 5.0}},
 		},
 	}
-	_, err := parseDrawPayload(payload)
+	_, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "2 elements")
 }
@@ -175,7 +175,7 @@ func TestParseDrawPayload_nonNumeric(t *testing.T) {
 			[]interface{}{[]interface{}{"not a number", 0.0}},
 		},
 	}
-	_, err := parseDrawPayload(payload)
+	_, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
@@ -487,7 +487,7 @@ func TestGoToRestPose_noneConfigured(t *testing.T) {
 }
 
 func TestDrawWaypoints_approachIsNotLinear(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 5}}}, r3.Vector{X: 100, Y: 200, Z: 50}, r3.Vector{X: 1}, 55, 50)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 5}}}, 0, r3.Vector{X: 100, Y: 200, Z: 50}, r3.Vector{X: 1}, 55, 50)
 	test.That(t, len(wps), test.ShouldEqual, 4)
 
 	test.That(t, wps[0].label, test.ShouldEqual, "polyline 0 approach")
@@ -500,7 +500,7 @@ func TestDrawWaypoints_approachIsNotLinear(t *testing.T) {
 }
 
 func TestDrawWaypoints_everyPolylineTravelsFreely(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}}, {{5, 5}}, {{9, 9}}}, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}}, {{5, 5}}, {{9, 9}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
 	var free int
 	for _, wp := range wps {
 		if !wp.linear {
@@ -513,7 +513,7 @@ func TestDrawWaypoints_everyPolylineTravelsFreely(t *testing.T) {
 
 func TestDrawWaypoints_offsetsFromPaperCorner(t *testing.T) {
 	corner := r3.Vector{X: 100, Y: 200, Z: 50}
-	wps := drawWaypoints([]Polyline{{{3, 7}, {11, 13}}}, corner, r3.Vector{X: 1}, 55, 50)
+	wps := drawWaypoints([]Polyline{{{3, 7}, {11, 13}}}, 0, corner, r3.Vector{X: 1}, 55, 50)
 
 	test.That(t, wps[1].label, test.ShouldEqual, "polyline 0 pen-down")
 	test.That(t, wps[1].x, test.ShouldEqual, 103.0)
@@ -529,14 +529,14 @@ func TestDrawWaypoints_offsetsFromPaperCorner(t *testing.T) {
 // above with Z up, clockwise means a negative Z cross product; positive would
 // mean the drawing comes out mirrored.
 func TestDrawWaypoints_keepsHandednessFromAbove(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 10}}}, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 10}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
 	a, b, c := wps[1], wps[2], wps[3]
 	cross := (b.x-a.x)*(c.y-b.y) - (b.y-a.y)*(c.x-b.x)
 	test.That(t, cross, test.ShouldBeLessThan, 0)
 }
 
 func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 20}}}, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 20}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
 	last := wps[len(wps)-1]
 	test.That(t, last.label, test.ShouldEqual, "polyline 0 pen-up")
 	test.That(t, last.x, test.ShouldEqual, 10.0)
@@ -545,7 +545,7 @@ func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
 }
 
 func TestDrawWaypoints_onlyPenUpEndsAPolyline(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}}}, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
 	var ends int
 	for _, wp := range wps {
 		if wp.endsPolyline {
@@ -756,7 +756,7 @@ func TestDoCommand_statusVerb(t *testing.T) {
 func TestDrawWaypoints_pageFollowsTaughtTopEdge(t *testing.T) {
 	corner := r3.Vector{X: 100, Y: 200}
 	// Top edge taught along +Y: across is +Y, so down the page is +X.
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 5}}}, corner, r3.Vector{Y: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 5}}}, 0, corner, r3.Vector{Y: 1}, 5, 0)
 	test.That(t, wps[2].x, test.ShouldAlmostEqual, 100.0)
 	test.That(t, wps[2].y, test.ShouldAlmostEqual, 210.0)
 	test.That(t, wps[3].x, test.ShouldAlmostEqual, 105.0)
@@ -780,4 +780,95 @@ func TestConfigValidate_topRightCornerAccepted(t *testing.T) {
 	cfg.PaperTopRightCorner = &r3.Vector{X: cfg.PaperTopLeftCorner.Translation.X, Y: cfg.PaperTopLeftCorner.Translation.Y + 279.4}
 	_, _, err := cfg.Validate("")
 	test.That(t, err, test.ShouldBeNil)
+}
+
+func twoPolylinePayload(startAt int) map[string]interface{} {
+	return map[string]interface{}{
+		"polylines": []interface{}{
+			[]interface{}{[]interface{}{0.0, 0.0}, []interface{}{10.0, 5.0}},
+			[]interface{}{[]interface{}{20.0, 20.0}},
+		},
+		"start_at": startAt,
+	}
+}
+
+func TestParseDrawPayload_startAt(t *testing.T) {
+	_, startAt, err := parseDrawPayload(twoPolylinePayload(1))
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, startAt, test.ShouldEqual, 1)
+
+	for _, bad := range []int{-1, 2} {
+		_, _, err := parseDrawPayload(twoPolylinePayload(bad))
+		test.That(t, err, test.ShouldNotBeNil)
+		test.That(t, err.Error(), test.ShouldContainSubstring, "start_at")
+	}
+}
+
+func TestDrawWaypoints_startsPartWayWithAbsoluteLabels(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}, {6, 6}}}, 1, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	test.That(t, wps[0].label, test.ShouldEqual, "polyline 1 approach")
+	test.That(t, wps[0].x, test.ShouldEqual, 5.0)
+	var ends int
+	for _, wp := range wps {
+		if wp.endsPolyline {
+			ends++
+		}
+	}
+	test.That(t, ends, test.ShouldEqual, 1)
+}
+
+func TestPause_nothingRunning(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	resp, err := d.pause(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["paused"], test.ShouldEqual, false)
+}
+
+func TestPause_waitsForTheDrawToStop(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	_, release, err := d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+
+	returned := make(chan map[string]interface{})
+	go func() {
+		resp, _ := d.pause(context.Background())
+		returned <- resp
+	}()
+	for !d.pausePending() {
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-returned:
+		t.Fatal("pause returned while the draw still held the arm")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	// What executeDraw does when it sees the request at a polyline boundary.
+	d.hold([]Polyline{{{0, 0}}, {{1, 1}}, {{2, 2}}}, 2)
+	d.setPhase(phasePaused)
+	release()
+
+	resp := <-returned
+	test.That(t, resp["paused"], test.ShouldEqual, true)
+	test.That(t, resp["next_polyline"], test.ShouldEqual, 2)
+	test.That(t, resp["resumable"], test.ShouldEqual, true)
+	test.That(t, d.pausePending(), test.ShouldBeFalse)
+}
+
+func TestResume_nothingHeld(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	_, err := d.resume(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "nothing to resume")
+}
+
+func TestResume_refusedWhileAnotherDrawRuns(t *testing.T) {
+	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+	d.hold([]Polyline{{{0, 0}}}, 0)
+	_, release, err := d.acquireDrawSlot(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	defer release()
+	_, err = d.resume(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "already running")
 }
