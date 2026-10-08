@@ -609,8 +609,24 @@ def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0
     return [p for p in s if len(p) > 1]
 
 
-def sketch_polylines(img):
+def face_fraction(face_width_px, img_shape):
+    """Face width as a share of the photo's shorter side: a visitor at the camera is
+    about 0.25-0.4, a face across the room or in a poster a few hundredths."""
+    return face_width_px / min(img_shape[:2])
+
+
+def sketch_polylines(img, min_face_fraction=0.12):
     """Photo (BGR) in; pixel-space polylines and the size of the face crop they live in out."""
+    if not itp._YUNET_PATH.exists():
+        raise RuntimeError(f"sketch style: face model missing at {itp._YUNET_PATH}; first_run.sh downloads it")
+    face = itp.detect_face(img)
+    if face is None:
+        raise ValueError("sketch style: no face found in the photo")
+    share = face_fraction(face[2], img.shape)
+    if share < min_face_fraction:
+        raise ValueError(
+            f"sketch style: no face close enough to the camera (largest face is {share:.0%} of the "
+            f"frame, need at least {min_face_fraction:.0%})")
     box = itp.face_crop_box(img, 0.7, 1.3, 1.1)
     if box:
         img = img[box[1]:box[3], box[0]:box[2]]

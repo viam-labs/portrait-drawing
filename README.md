@@ -291,6 +291,7 @@ Every attribute is optional; the defaults are tuned for portraits.
 | Attribute | Type | Description |
 |---|---|---|
 | `style` | string | `lines` (default) traces the photo directly. `sketch` draws a cleaner, hand-sketched portrait — see [The sketch style](#the-sketch-style). The attributes below tune `lines` only. |
+| `min_face_fraction` | number | `sketch` only. Rejects a photo whose largest face is narrower than this share of the photo's shorter side, so an empty frame returns an error instead of drawing a face from the background. Default `0.12`. |
 | `size` | int | Long side, in pixels, the model sees. Larger recovers finer features — lashes, nostrils — at a roughly linear cost in strokes. Default `768`. |
 | `clahe` | number | Local contrast lift before the model runs. Default `2.0`; `0` disables. |
 | `sigma` | number | Smoothing of the model response before ridges are traced. Default `2.2`. |
@@ -362,8 +363,13 @@ real lobby photos and hand tracings to avoid that.
   extracted short strokes, which carry their texture.
 - **Strokes are simplified to what a pen can resolve and ordered nearest-first** to
   keep pen-up travel short. Nothing is dropped to save drawing time.
-- **It needs a face.** A photo where MediaPipe finds none fails with
-  `sketch style: no face found in the photo` rather than drawing the room.
+- **It needs a face, close to the camera.** A photo with no face fails with
+  `sketch style: no face found in the photo`, and one whose largest face is
+  narrower than `min_face_fraction` of the frame fails with
+  `no face close enough to the camera`. Measured on a 1280×720 arm camera, a
+  visitor in front of it was 0.24–0.37 and a face on the far wall 0.03, which is
+  what the 0.12 default sits between. A different camera or distance shifts
+  these, so re-measure when it changes.
 - **It costs more**: a few seconds per photo on a laptop, and about 28 MB of extra
   models that `first_run.sh` downloads. A failed download disables only this style.
 

@@ -40,6 +40,10 @@ type Config struct {
 	// hand-sketch look, with eyes, lips, brows, glasses and facial hair drawn
 	// from face landmarks; the tuning knobs below apply to "lines" only.
 	Style string `json:"style,omitempty"`
+	// MinFaceFraction (sketch only) rejects a photo whose largest face is
+	// narrower than this share of its shorter side, so an empty frame errors
+	// instead of drawing a face from the background. Nil uses 0.12.
+	MinFaceFraction *float64 `json:"min_face_fraction,omitempty"`
 
 	// Pointer knobs are nil-as-omitted so the Python pipeline's own default
 	// applies; an explicit 0 is honoured.
@@ -99,6 +103,9 @@ const (
 
 // Validate returns implicit dependencies and any config errors.
 func (cfg *Config) Validate(_ string) ([]string, []string, error) {
+	if cfg.MinFaceFraction != nil && (*cfg.MinFaceFraction < 0 || *cfg.MinFaceFraction >= 1) {
+		return nil, nil, fmt.Errorf("min_face_fraction must be in [0, 1), got %g", *cfg.MinFaceFraction)
+	}
 	switch cfg.Style {
 	case "", styleLines, styleSketch:
 	default:
@@ -261,6 +268,9 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 	}
 	if s.cfg.Style != "" {
 		args = append(args, "--style", s.cfg.Style)
+	}
+	if s.cfg.MinFaceFraction != nil {
+		args = append(args, "--min-face-fraction", strconv.FormatFloat(*s.cfg.MinFaceFraction, 'f', -1, 64))
 	}
 	if s.cfg.Size != nil {
 		args = append(args, "--size", strconv.Itoa(*s.cfg.Size))
