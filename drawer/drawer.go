@@ -196,6 +196,15 @@ type drawer struct {
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
 	progress progress
+	// drawDone is closed when the running draw releases its slot, so pause can
+	// wait for the arm to be free.
+	drawDone chan struct{}
+	// pauseRequested stops the running draw at the next polyline boundary.
+	pauseRequested bool
+	// held is the job a pause, cancel or failure interrupted, kept so resume can
+	// carry on from nextPolyline. Cleared when a draw finishes.
+	held         []Polyline
+	nextPolyline int
 }
 
 // Phases a drawing passes through, reported by the status verb. A drawing runs
@@ -210,6 +219,7 @@ const (
 	phaseDone       = "done"
 	phaseCanceled   = "canceled"
 	phaseFailed     = "failed"
+	phasePaused     = "paused"
 )
 
 type progress struct {
@@ -229,7 +239,7 @@ func (d *drawer) setPhase(phase string) {
 		d.progress = progress{startedAt: time.Now()}
 	}
 	d.progress.phase = phase
-	if phase == phaseDone || phase == phaseCanceled || phase == phaseFailed {
+	if phase == phaseDone || phase == phaseCanceled || phase == phaseFailed || phase == phasePaused {
 		d.progress.endedAt = time.Now()
 	}
 }
@@ -290,6 +300,10 @@ func (d *drawer) status() map[string]interface{} {
 	}
 	if p.lastError != "" {
 		out["last_error"] = p.lastError
+	}
+	if d.held != nil {
+		out["resumable"] = true
+		out["next_polyline"] = d.nextPolyline
 	}
 	return out
 }
@@ -390,34 +404,40 @@ type Polyline [][2]float64
 
 type drawArgs struct {
 	Polylines [][][]float64 `json:"polylines"`
+	// StartAt skips the polylines before it, to carry on a job whose earlier
+	// strokes are already on the paper.
+	StartAt int `json:"start_at,omitempty"`
 }
 
-func parseDrawPayload(payload interface{}) ([]Polyline, error) {
+func parseDrawPayload(payload interface{}) ([]Polyline, int, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal payload: %w", err)
+		return nil, 0, fmt.Errorf("marshal payload: %w", err)
 	}
 	var args drawArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, fmt.Errorf("parse payload: %w", err)
+		return nil, 0, fmt.Errorf("parse payload: %w", err)
 	}
 	if len(args.Polylines) == 0 {
-		return nil, errors.New("polylines is required and must be non-empty")
+		return nil, 0, errors.New("polylines is required and must be non-empty")
+	}
+	if args.StartAt < 0 || args.StartAt >= len(args.Polylines) {
+		return nil, 0, fmt.Errorf("start_at must be in [0, %d), got %d", len(args.Polylines), args.StartAt)
 	}
 	out := make([]Polyline, len(args.Polylines))
 	for i, poly := range args.Polylines {
 		if len(poly) == 0 {
-			return nil, fmt.Errorf("polyline %d is empty", i)
+			return nil, 0, fmt.Errorf("polyline %d is empty", i)
 		}
 		out[i] = make(Polyline, len(poly))
 		for j, pt := range poly {
 			if len(pt) != 2 {
-				return nil, fmt.Errorf("polyline %d point %d must have exactly 2 elements, got %d", i, j, len(pt))
+				return nil, 0, fmt.Errorf("polyline %d point %d must have exactly 2 elements, got %d", i, j, len(pt))
 			}
 			out[i][j] = [2]float64{pt[0], pt[1]}
 		}
 	}
-	return out, nil
+	return out, args.StartAt, nil
 }
 
 func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -434,13 +454,17 @@ func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map
 		return d.captureAndDraw(ctx, cmd["capture_and_draw"])
 	case "cancel":
 		return d.cancel(ctx)
+	case "pause":
+		return d.pause(ctx)
+	case "resume":
+		return d.resume(ctx)
 	case "status":
 		return d.status(), nil
 	case "go_home":
 		return d.goHome(ctx)
 	default:
 		return nil, fmt.Errorf(
-			"drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"capture_and_draw\", \"status\", \"cancel\", or \"go_home\"", v)
+			"drawer: unknown verb %q; expected \"draw\", \"draw_image\", \"capture_and_draw\", \"status\", \"pause\", \"resume\", \"cancel\", or \"go_home\"", v)
 	}
 }
 
@@ -512,17 +536,79 @@ func (d *drawer) acquireDrawSlot(parent context.Context) (context.Context, func(
 	d.mu.Lock()
 	if d.cancelFn != nil {
 		d.mu.Unlock()
-		return nil, nil, errors.New("drawer: another draw is already running; call cancel first")
+		return nil, nil, errors.New("drawer: another draw is already running; call pause or cancel first")
 	}
 	ctx, cancel := context.WithCancel(parent)
 	d.cancelFn = cancel
+	done := make(chan struct{})
+	d.drawDone = done
+	d.pauseRequested = false
 	d.mu.Unlock()
 	return ctx, func() {
 		d.mu.Lock()
 		d.cancelFn = nil
+		d.drawDone = nil
+		d.pauseRequested = false
 		d.mu.Unlock()
 		cancel()
+		close(done)
 	}, nil
+}
+
+// pause asks the running draw to stop after the polyline it is on, with the pen
+// up and the arm back at its rest pose, and waits for that so the arm is free
+// for another job when it returns.
+func (d *drawer) pause(ctx context.Context) (map[string]interface{}, error) {
+	d.mu.Lock()
+	done := d.drawDone
+	if done == nil {
+		d.mu.Unlock()
+		return map[string]interface{}{"paused": false, "reason": "nothing running"}, nil
+	}
+	d.pauseRequested = true
+	d.mu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("drawer: waiting for the draw to pause: %w", ctx.Err())
+	}
+	out := d.status()
+	out["paused"] = d.statusPhase() == phasePaused
+	return out, nil
+}
+
+func (d *drawer) statusPhase() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.progress.phase
+}
+
+// resume carries on the job a pause, cancel or failure interrupted.
+func (d *drawer) resume(parent context.Context) (map[string]interface{}, error) {
+	d.mu.Lock()
+	held, next := d.held, d.nextPolyline
+	d.mu.Unlock()
+	if held == nil {
+		return nil, errors.New("drawer: nothing to resume")
+	}
+	ctx, release, err := d.acquireDrawSlot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return d.executeDraw(ctx, held, next)
+}
+
+func (d *drawer) pausePending() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.pauseRequested
+}
+
+func (d *drawer) hold(polylines []Polyline, next int) {
+	d.mu.Lock()
+	d.held, d.nextPolyline = polylines, next
+	d.mu.Unlock()
 }
 
 func (d *drawer) cancel(ctx context.Context) (map[string]interface{}, error) {
@@ -764,7 +850,7 @@ func (d *drawer) generateStrokes(
 	if err != nil {
 		return nil, fmt.Errorf("drawer: stroke_generator call: %w", err)
 	}
-	polylines, err := parseDrawPayload(resp)
+	polylines, _, err := parseDrawPayload(resp)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
@@ -803,7 +889,7 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 	}
 
 	if !a.Preview {
-		return d.executeDraw(ctx, polylines)
+		return d.executeDraw(ctx, polylines, 0)
 	}
 	resp := map[string]interface{}{
 		"preview":        true,
@@ -819,7 +905,7 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 }
 
 func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
-	polylines, err := parseDrawPayload(payload)
+	polylines, startAt, err := parseDrawPayload(payload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
@@ -828,7 +914,7 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 		return nil, err
 	}
 	defer release()
-	return d.executeDraw(ctx, polylines)
+	return d.executeDraw(ctx, polylines, startAt)
 }
 
 // constraints builds the planner constraints for one move: the configured
@@ -885,9 +971,10 @@ func paperToWorld(corner, across r3.Vector, p [2]float64) (float64, float64) {
 	return corner.X + p[0]*across.X + p[1]*down.X, corner.Y + p[0]*across.Y + p[1]*down.Y
 }
 
-func drawWaypoints(polylines []Polyline, corner, across r3.Vector, zUp, zDown float64) []waypoint {
+func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zUp, zDown float64) []waypoint {
 	var out []waypoint
-	for i, poly := range polylines {
+	for k, poly := range polylines[first:] {
+		i := first + k
 		sx, sy := paperToWorld(corner, across, poly[0])
 		out = append(out,
 			waypoint{x: sx, y: sy, z: zUp, label: fmt.Sprintf("polyline %d approach", i)},
@@ -906,7 +993,7 @@ func drawWaypoints(polylines []Polyline, corner, across r3.Vector, zUp, zDown fl
 	return out
 }
 
-func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[string]interface{}, error) {
+func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt int) (map[string]interface{}, error) {
 	fs, err := d.buildFrameSystem(ctx)
 	if err != nil {
 		return nil, err
@@ -921,12 +1008,18 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 	for _, poly := range polylines {
 		total += len(poly)
 	}
-	d.logger.Infof("drawer: drawing %d polylines, %d points", len(polylines), total)
+	if startAt > 0 {
+		d.logger.Infof("drawer: resuming at polyline %d of %d", startAt, len(polylines))
+	} else {
+		d.logger.Infof("drawer: drawing %d polylines, %d points", len(polylines), total)
+	}
 	d.startDrawing(len(polylines), total)
+	d.advanceDrawing(startAt)
+	d.hold(polylines, startAt)
 	startedAt := time.Now()
-	drawn, nextProgress := 0, progressStepPercent
+	drawn, nextProgress := startAt, progressStepPercent
 
-	for _, wp := range drawWaypoints(polylines, corner, d.pageAcross, zUp, zDown) {
+	for _, wp := range drawWaypoints(polylines, startAt, corner, d.pageAcross, zUp, zDown) {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
@@ -945,6 +1038,22 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		}
 		drawn++
 		d.advanceDrawing(drawn)
+		d.hold(polylines, drawn)
+		if drawn < len(polylines) && d.pausePending() {
+			d.logger.Infof("drawer: paused after polyline %d of %d", drawn, len(polylines))
+			if d.hasRestPose() {
+				if err := d.goToRestPose(ctx, fs); err != nil {
+					d.setFailed(err)
+					return nil, fmt.Errorf("drawer: return to rest pose for pause: %w", err)
+				}
+			}
+			d.setPhase(phasePaused)
+			return map[string]interface{}{
+				"paused":          true,
+				"next_polyline":   drawn,
+				"polylines_total": len(polylines),
+			}, nil
+		}
 		// 100% is left to the "finished" line below.
 		if percent := drawn * 100 / len(polylines); percent >= nextProgress && percent < 100 {
 			d.logger.Infof("drawer: %d%% — %d/%d polylines, %s elapsed",
@@ -955,6 +1064,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline) (map[str
 		}
 	}
 	d.logger.Infof("drawer: finished %d polylines in %s", len(polylines), time.Since(startedAt).Round(time.Second))
+	d.hold(nil, 0)
 
 	if d.hasRestPose() {
 		if err := d.goToRestPose(ctx, fs); err != nil {

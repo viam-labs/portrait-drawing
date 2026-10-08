@@ -229,6 +229,14 @@ top-left corner. This is what the other verbs call underneath.
 {"draw": {"polylines": [[[0, 0], [10, 5]], [[20, 20], [25, 30]]]}}
 ```
 
+`start_at` skips the polylines before that index, for carrying on a job whose
+earlier strokes are already on the paper — after a restart, say, when the drawer
+no longer holds the job itself:
+
+```json
+{"draw": {"polylines": [...], "start_at": 37}}
+```
+
 ### `status`
 
 A drawing runs for minutes with the DoCommand that started it still outstanding,
@@ -257,11 +265,36 @@ so this is how you find out what is happening — or whether anything is.
 Readable while a drawing is in flight: `executeDraw` holds the draw slot but not
 the mutex, so this does not queue behind it.
 
+### `pause` and `resume`
+
+For sharing the arm: a portrait can make way for a quick, urgent job — a name
+tag — and then carry on.
+
+```json
+{"pause": {}}
+```
+
+`pause` lets the polyline being drawn finish, lifts the pen, returns to the rest
+pose, and only then responds, so the arm is free for something else as soon as
+the call returns. The response is the `status` shape with `"paused": true` and
+`next_polyline`. With nothing running it returns `{"paused": false}`.
+
+```json
+{"resume": {}}
+```
+
+`resume` carries on the held job from `next_polyline`. The drawer holds a job
+whenever one was interrupted — by `pause`, `cancel`, or a failure part-way, in
+which case the stroke that failed is redrawn — until a draw finishes, and
+`status` shows `"resumable": true` while it does. `capture_and_draw` and
+`draw_image` jobs resume the same way. The held job lives in memory: after a
+restart, resend the polylines with `draw` and `start_at`.
+
 ### `cancel` and `go_home`
 
-`cancel` aborts whatever is drawing and stops the arm. `go_home` moves to the
-rest pose. Only one draw runs at a time — starting a second returns an error
-telling you to cancel the first.
+`cancel` aborts whatever is drawing and stops the arm, leaving the job resumable.
+`go_home` moves to the rest pose. Only one draw runs at a time — starting a second
+returns an error telling you to cancel or pause the first.
 
 ```json
 {"cancel": {}}
