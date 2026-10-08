@@ -10,6 +10,10 @@ Two services work together:
 - **`viam:portrait-drawing:drawer`** — takes polylines and draws them, lifting
   the pen between strokes.
 
+Two more build on them: **`text-writer`** writes a line of text, such as a name
+tag, through a drawer, and **`reception-queue`** runs name tags and portraits on
+one arm in the right order.
+
 The drawer can drive the whole loop itself: pose the arm so its camera frames
 the subject, take the photo, generate the strokes, and draw the result — one
 DoCommand, no image data passing through your hands.
@@ -425,6 +429,72 @@ The `lines` tuning attributes, `isolate_subject` and the depth band do not apply
 `{"polylines": [[[x, y], …], …]}` in paper-local mm — exactly the shape the
 drawer's `draw` verb accepts.
 
+## `viam:portrait-drawing:text-writer`
+
+Writes a line of text on a card — a name on a name tag — through a drawer. It
+lays the text out as polylines in card-local mm, hands them to the drawer's
+`draw` verb, and returns when the drawer does, pen up. That blocking contract
+is what the reception queue's `name_tag_writer` expects, so this service is the
+one to name there.
+
+### Configuration
+
+```json
+{
+  "drawer": "tag-drawer",
+  "paper_width_mm": 85.9,
+  "paper_height_mm": 59.2
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `drawer` | string | **yes** | The `drawer` that holds the pen over the card. |
+| `paper_width_mm`, `paper_height_mm` | number | **yes** | The card, which must match that drawer's paper geometry. |
+| `fill` | number | no | Fraction of the card the text fills on whichever axis binds first. Default `0.8`. A long name is limited by the card's width, a short one by its height. |
+| `cap_height_mm` | number | no | Fix the capital height instead of filling. Text that would overflow the card at that height is refused rather than drawn off the edge. |
+| `stroke_font` | string | no | A single-stroke [Hershey](https://en.wikipedia.org/wiki/Hershey_fonts) face. Default `cursive`, a joined-up script; `futural` is a plain sans, `rowmans` and `timesr` are seriffed. |
+| `join` | bool | no | Keep the pen down between the letters of a script face, so a word is one stroke. Default true. Word spaces stay as lifts. |
+| `outline` | bool | no | Trace TTF outlines from `font` instead of a stroke font. A TTF describes the boundary of each letter, so this draws hollow letters, at three times the points. |
+| `font` | string | no | TTF family for `outline`. Default tries Helvetica, then its metric-compatible clones. |
+| `spacing_mm` | number | no | Spacing of the points along each stroke. Default `2`. |
+
+The drawer sees a card the way it sees a sheet of paper: teach its
+`paper_top_left_corner` at the card's corner and set its `paper_width_mm` and
+`paper_height_mm` to the card. A machine that draws portraits as well needs a
+second drawer on the same arm for the card; the queue pauses the portrait drawer
+before a tag is written, and both return to the same rest pose if they share a
+`capture_pose`. Nothing moves the card into place: the geometry assumes the next
+card is wherever the last one was, which is what a card feeder provides.
+
+Sizing is in the writer's hands rather than the caller's because the card is
+fixed and the names are not: with `fill`, "Ada Lovelace" and "Al" each take as
+much of the card as they can, which is not the same height.
+
+### `write`
+
+```json
+{"write": {"text": "Ada Lovelace"}}
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `text` | string | What to write. Required. |
+| `cap_height_mm`, `fill` | number | Override the configured sizing for this call. |
+| `preview` | bool | Lay the text out and return the polylines without drawing. |
+
+Returns the drawer's response plus the layout: `font`, `cap_mm`, the inked
+`bbox_w_mm` x `bbox_h_mm`, and `polylines_total`. A drawer that is paused
+part-way returns with the pen up and the text unfinished; the writer reports
+that as an error rather than a written tag.
+
+`python/text_to_polylines.py` does the layout and runs on its own, which is
+the quick way to check a font or a size without an arm:
+
+```bash
+.venv/bin/python python/text_to_polylines.py --text "Ada Lovelace" --width-mm 85.9 --height-mm 59.2
+```
+
 ## `viam:portrait-drawing:reception-queue`
 
 Runs a reception desk's jobs on one arm: name tags, which a visitor needs before
@@ -438,7 +508,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
   "drawer": "drawer",
   "stroke_generator": "stroke-generator",
   "photo": "visitor-photo",
-  "name_tag_writer": "font-writer",
+  "name_tag_writer": "text-writer",
   "name_tag_command": { "write": { "text": "{name}", "cap_height_mm": 12 } },
   "paper_width_mm": 101.6,
   "paper_height_mm": 152.4,
@@ -451,7 +521,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
 | `drawer` | string | **yes** | The `drawer` that draws portraits. |
 | `stroke_generator` | string | **yes** | Turns each portrait photo into strokes when it is queued. |
 | `photo` | string | no | A [frame-buffer](https://github.com/viam-labs/frame-buffer) camera over the visitor-facing webcam. `enqueue_portrait` without `image_b64` draws the frame it holds, then clears it. |
-| `name_tag_writer` | string | no | A service that writes a name tag. Without it, `enqueue_name_tag` is refused. |
+| `name_tag_writer` | string | no | A service that writes a name tag, such as a [`text-writer`](#viamportrait-drawingtext-writer). Without it, `enqueue_name_tag` is refused. |
 | `name_tag_command` | object | no | The DoCommand sent to `name_tag_writer`; every `{name}` in a string value is replaced with the visitor's name. Default `{"write": {"text": "{name}"}}`. |
 | `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
 | `state_file` | string | no | Where jobs are saved. Default a file named after the service in `$VIAM_MODULE_DATA`. |
