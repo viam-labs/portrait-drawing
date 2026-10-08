@@ -51,3 +51,23 @@ def test_unknown_style_is_rejected():
     img = np.full((100, 100, 3), 200, np.uint8)
     with pytest.raises(ValueError, match="style"):
         image_bytes_to_polylines(_png(img), 215.9, 279.4, 25, 0, False, 20, 36, 2.0, 3.0, style="cartoon")
+
+
+def test_face_fraction_uses_the_shorter_side():
+    assert sketch_style.face_fraction(180, (720, 1280, 3)) == pytest.approx(0.25)
+
+
+def test_a_face_too_far_away_is_rejected(monkeypatch):
+    # Measured on armfarm7: a face on the far wall was 20 px wide in a 1280x720 frame.
+    monkeypatch.setattr(sketch_style.itp, "detect_face", lambda img: (600.0, 300.0, 20.0, 24.0))
+    img = np.full((720, 1280, 3), 200, np.uint8)
+    with pytest.raises(ValueError, match="close enough"):
+        sketch_style.sketch_polylines(img)
+
+
+def test_the_threshold_is_configurable(monkeypatch):
+    monkeypatch.setattr(sketch_style.itp, "detect_face", lambda img: (600.0, 300.0, 20.0, 24.0))
+    img = np.full((720, 1280, 3), 200, np.uint8)
+    # Allowed through the size check; it then fails later for want of real landmarks.
+    with pytest.raises(ValueError, match="no face found"):
+        sketch_style.sketch_polylines(img, min_face_fraction=0.01)

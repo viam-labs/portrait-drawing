@@ -276,3 +276,21 @@ func TestBuildCLIArgs_stylePassedThrough(t *testing.T) {
 	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
 	test.That(t, args, test.ShouldContainSubstring, "--style sketch")
 }
+
+func TestConfigValidate_minFaceFraction(t *testing.T) {
+	for _, ok := range []float64{0, 0.12, 0.5} {
+		_, _, err := (&Config{MinFaceFraction: ptr(ok)}).Validate("")
+		test.That(t, err, test.ShouldBeNil)
+	}
+	for _, bad := range []float64{-0.1, 1, 2} {
+		_, _, err := (&Config{MinFaceFraction: ptr(bad)}).Validate("")
+		test.That(t, err, test.ShouldNotBeNil)
+		test.That(t, err.Error(), test.ShouldContainSubstring, "min_face_fraction")
+	}
+}
+
+func TestBuildCLIArgs_minFaceFractionPassedThrough(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{Style: "sketch", MinFaceFraction: ptr(0.2)}}
+	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldContainSubstring, "--min-face-fraction 0.2")
+}

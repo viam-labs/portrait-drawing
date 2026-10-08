@@ -485,6 +485,7 @@ def image_bytes_to_polylines(
     max_depth_mm: float = 1500.0,
     min_depth_mm: float = 0.0,
     style: str = "lines",
+    min_face_fraction: float = 0.12,
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -495,7 +496,7 @@ def image_bytes_to_polylines(
     if style == "sketch":
         # Imported here so the default style never pays for MediaPipe at startup.
         import sketch_style
-        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img)
+        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img, min_face_fraction)
         if auto_rotate:
             rotate = _rotation_for_paper(crop_w, crop_h, paper_width_mm, paper_height_mm)
         mm = polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
@@ -560,6 +561,8 @@ def main() -> int:
     p.add_argument("--min-dist", type=float, default=3.0)
     p.add_argument("--style", choices=["lines", "sketch"], default="lines",
                    help="lines: trace the photo directly; sketch: cartoonize, then a cleaned-up hand-sketch look")
+    p.add_argument("--min-face-fraction", type=float, default=0.12,
+                   help="sketch only: reject photos whose largest face is narrower than this share of the shorter side")
     args = p.parse_args()
 
     image_bytes = sys.stdin.buffer.read()
@@ -594,6 +597,7 @@ def main() -> int:
             crop_sides=args.crop_sides,
             auto_rotate=args.auto_rotate,
             style=args.style,
+            min_face_fraction=args.min_face_fraction,
         )
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
