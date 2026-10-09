@@ -275,7 +275,7 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
 	var layout map[string]interface{}
-	if err := json.Unmarshal(stdout, &layout); err != nil {
+	if err = json.Unmarshal(stdout, &layout); err != nil {
 		return nil, fmt.Errorf("text-writer: parse python output: %w", err)
 	}
 	polylines, ok := layout["polylines"].([]interface{})
