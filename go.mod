@@ -4,7 +4,7 @@ go 1.25.10
 
 require (
 	github.com/golang/geo v0.0.0-20230421003525-6adc56603217
-	go.viam.com/rdk v1.11.0
+	go.viam.com/rdk v1.12.0
 	go.viam.com/test v1.2.5
 )
 
@@ -206,7 +206,7 @@ require (
 	go.uber.org/goleak v1.3.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.28.0 // indirect
-	go.viam.com/api v0.1.587 // indirect
+	go.viam.com/api v0.1.590 // indirect
 	go.viam.com/utils v0.13.2 // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20230525183740-e7c30c78aeb2 // indirect
 	golang.org/x/crypto v0.55.0 // indirect

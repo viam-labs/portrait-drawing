@@ -9,8 +9,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.app.json"
   },
   "dependencies": {
-    "@viamrobotics/sdk": "^0.74.2",
-    "@viamrobotics/svelte-sdk": "^1.2.3",
+    "@viamrobotics/sdk": "^0.77.0",
+    "@viamrobotics/svelte-sdk": "^1.5.3",
     "typescript-cookie": "^1.0.6"
   },
   "devDependencies": {
