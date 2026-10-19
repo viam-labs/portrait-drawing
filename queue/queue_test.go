@@ -35,6 +35,9 @@ type fakeDrawer struct {
 	stopped    chan struct{}
 	calls      []string
 	failOnDraw error
+	// pauseGate, when set, holds a pause call back until it is closed, like a
+	// pause still in flight.
+	pauseGate chan struct{}
 }
 
 func newFakeDrawer() *fakeDrawer {
@@ -88,6 +91,12 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 			}
 		case "pause":
 			f.mu.Lock()
+			gate := f.pauseGate
+			f.mu.Unlock()
+			if gate != nil {
+				<-gate
+			}
+			f.mu.Lock()
 			if !f.running {
 				f.mu.Unlock()
 				return map[string]interface{}{"paused": false}, nil
@@ -124,14 +133,21 @@ type fakeWriter struct {
 	mu    sync.Mutex
 	cmds  []map[string]interface{}
 	wrote chan string
+	// block keeps the writer writing until its context ends.
+	block bool
 }
 
-func (w *fakeWriter) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (w *fakeWriter) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
 	w.mu.Lock()
 	w.cmds = append(w.cmds, cmd)
+	block := w.block
 	w.mu.Unlock()
 	text := cmd["write"].(map[string]interface{})["text"].(string)
 	w.wrote <- text
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	return map[string]interface{}{}, nil
 }
 
@@ -447,4 +463,79 @@ func TestARejectedPhotoIsClearedToo(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "face is too small")
 	test.That(t, *held, test.ShouldBeNil)
 	test.That(t, h.q.status()["waiting"], test.ShouldBeEmpty)
+}
+
+func TestALatePauseLandsBeforeTheNameTagStarts(t *testing.T) {
+	h := newHarness(t)
+	gate := make(chan struct{})
+	h.drawer.pauseGate = gate
+	h.q.start()
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.waitDrawing(t)
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	for i := 0; i < 6; i++ {
+		h.drawer.step(t)
+	}
+	select {
+	case name := <-h.writer.wrote:
+		t.Fatalf("wrote %q while the pause was still in flight", name)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(gate)
+	select {
+	case <-h.writer.wrote:
+	case <-time.After(2 * time.Second):
+		t.Fatal("name tag never written")
+	}
+	h.waitState(t, portrait, stateDone)
+}
+
+func TestCancelStopsANameTagBeingWritten(t *testing.T) {
+	h := newHarness(t)
+	h.writer.block = true
+	h.q.start()
+	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	<-h.writer.wrote
+	resp, err := h.q.DoCommand(context.Background(), map[string]interface{}{"cancel_job": map[string]interface{}{"job_id": id}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["state"], test.ShouldEqual, stateCanceled)
+	h.drawer.mu.Lock()
+	test.That(t, h.drawer.calls, test.ShouldContain, "cancel")
+	h.drawer.mu.Unlock()
+
+	h.writer.mu.Lock()
+	h.writer.block = false
+	h.writer.mu.Unlock()
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	select {
+	case name := <-h.writer.wrote:
+		test.That(t, name, test.ShouldEqual, "Grace")
+	case <-time.After(2 * time.Second):
+		t.Fatal("the queue stayed stuck on the canceled tag")
+	}
+	s, err := h.q.jobSummary(id)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateCanceled)
+}
+
+func TestARestartFailsAnInterruptedNameTagInsteadOfRewritingIt(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "queue.json")
+	raw, _ := json.Marshal([]*Job{{ID: "tag", Kind: kindNameTag, Name: "Ada", State: stateActive, CreatedAt: time.Now()}})
+	test.That(t, os.WriteFile(state, raw, 0o600), test.ShouldBeNil)
+
+	writer := &fakeWriter{wrote: make(chan string, 1)}
+	q := newWithClients(generic.Named("queue"), logging.NewTestLogger(t), newFakeDrawer(), &fakeGenerator{}, writer, &Config{}, state)
+	test.That(t, q.load(), test.ShouldBeNil)
+	q.start()
+	defer func() { test.That(t, q.Close(context.Background()), test.ShouldBeNil) }()
+
+	s, err := q.jobSummary("tag")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateFailed)
+	test.That(t, s["error"], test.ShouldContainSubstring, "replace it")
+	select {
+	case name := <-writer.wrote:
+		t.Fatalf("rewrote %q on the partly written card", name)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
