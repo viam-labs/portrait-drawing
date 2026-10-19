@@ -48,7 +48,7 @@ type Config struct {
 	// touches the paper's top-left corner: smallest X, largest Y, since the
 	// page runs +X across and -Y down. Orientation is reused for every
 	// waypoint so the pen keeps the same attitude across the whole drawing.
-	PaperTopLeftCorner *poseConfig `json:"paper_top_left_corner"`
+	PaperTopLeftCorner *PoseConfig `json:"paper_top_left_corner"`
 	// PaperTopRightCorner, when set, is where the pen touches the top-right
 	// corner. The page then runs from top-left toward it, so the sheet can face
 	// whichever way its reader stands. Unset keeps the page along +X.
@@ -58,7 +58,7 @@ type Config struct {
 	LiftOffZMM          float64    `json:"lift_off_z_mm,omitempty"`
 	// HomePose, if set, is the tool pose the arm rests at between drawings.
 	// CapturePose takes precedence over it when both are set.
-	HomePose *poseConfig `json:"home_pose,omitempty"`
+	HomePose *PoseConfig `json:"home_pose,omitempty"`
 	// AllowedCollisions lists frame pairs the planner should not treat as a
 	// collision. Anything bolted to the arm — a wrist camera, a pen holder —
 	// overlaps the link it is mounted on in every configuration, which the
@@ -91,9 +91,79 @@ type AllowedCollision struct {
 	Frame2 string `json:"frame2"`
 }
 
-type poseConfig struct {
+// PoseConfig is a tool pose as written in config.
+type PoseConfig struct {
 	Translation r3.Vector                      `json:"translation"`
 	Orientation *spatialmath.OrientationConfig `json:"orientation"`
+}
+
+// Paper is a drawing surface: the pose at its top-left corner, optionally the
+// position of its top-right corner, and its size. The drawer's config holds one;
+// a draw call may carry another, so a service with its own surface — a card
+// feeder beside the portrait paper — can draw with this drawer's arm.
+type Paper struct {
+	TopLeftCorner  *PoseConfig `json:"top_left_corner"`
+	TopRightCorner *r3.Vector  `json:"top_right_corner,omitempty"`
+	WidthMM        float64     `json:"width_mm"`
+	HeightMM       float64     `json:"height_mm"`
+}
+
+// Validate checks the surface. Field names in errors carry `prefix`, so a
+// config field reads as paper_top_left_corner and a payload one as paper.top_left_corner.
+func (p *Paper) Validate(path, prefix string) error {
+	if p.TopLeftCorner == nil {
+		return resource.NewConfigValidationFieldRequiredError(path, prefix+"top_left_corner")
+	}
+	if p.TopLeftCorner.Orientation == nil {
+		return resource.NewConfigValidationFieldRequiredError(path, prefix+"top_left_corner.orientation")
+	}
+	if p.WidthMM <= 0 {
+		return fmt.Errorf("%swidth_mm must be > 0, got %g", prefix, p.WidthMM)
+	}
+	if p.TopRightCorner != nil {
+		if d := topEdgeLength(p.TopLeftCorner.Translation, *p.TopRightCorner); d < minTopEdgeMM {
+			return fmt.Errorf(
+				"%stop_right_corner is %.1f mm from %stop_left_corner in X/Y; teach two distinct corners (at least %g mm apart)",
+				prefix, d, prefix, float64(minTopEdgeMM))
+		}
+	}
+	if p.HeightMM <= 0 {
+		return fmt.Errorf("%sheight_mm must be > 0, got %g", prefix, p.HeightMM)
+	}
+	return nil
+}
+
+// surface is a Paper resolved for drawing: the corner as a pose and the unit
+// world direction of the page's +x (left to right).
+type surface struct {
+	corner spatialmath.Pose
+	across r3.Vector
+}
+
+func (p *Paper) resolve(logger logging.Logger) (surface, error) {
+	orientation, err := p.TopLeftCorner.Orientation.ParseConfig()
+	if err != nil {
+		return surface{}, fmt.Errorf("parse top_left_corner.orientation: %w", err)
+	}
+	across := r3.Vector{X: 1}
+	if p.TopRightCorner != nil {
+		corner := p.TopLeftCorner.Translation
+		edge := r3.Vector{X: p.TopRightCorner.X - corner.X, Y: p.TopRightCorner.Y - corner.Y}
+		across = edge.Normalize()
+		if l := edge.Norm(); math.Abs(l-p.WidthMM) > topEdgeWarnMM {
+			logger.Warnf("drawer: taught top edge is %.1f mm but width_mm is %g; check both corners", l, p.WidthMM)
+		}
+	}
+	return surface{corner: spatialmath.NewPose(p.TopLeftCorner.Translation, orientation), across: across}, nil
+}
+
+func (cfg *Config) paper() *Paper {
+	return &Paper{
+		TopLeftCorner:  cfg.PaperTopLeftCorner,
+		TopRightCorner: cfg.PaperTopRightCorner,
+		WidthMM:        cfg.PaperWidthMM,
+		HeightMM:       cfg.PaperHeightMM,
+	}
 }
 
 const (
@@ -122,24 +192,8 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.Arm == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "arm")
 	}
-	if cfg.PaperTopLeftCorner == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "paper_top_left_corner")
-	}
-	if cfg.PaperTopLeftCorner.Orientation == nil {
-		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "paper_top_left_corner.orientation")
-	}
-	if cfg.PaperWidthMM <= 0 {
-		return nil, nil, fmt.Errorf("paper_width_mm must be > 0, got %g", cfg.PaperWidthMM)
-	}
-	if cfg.PaperTopRightCorner != nil {
-		if d := topEdgeLength(cfg.PaperTopLeftCorner.Translation, *cfg.PaperTopRightCorner); d < minTopEdgeMM {
-			return nil, nil, fmt.Errorf(
-				"paper_top_right_corner is %.1f mm from paper_top_left_corner in X/Y; teach two distinct corners (at least %g mm apart)",
-				d, float64(minTopEdgeMM))
-		}
-	}
-	if cfg.PaperHeightMM <= 0 {
-		return nil, nil, fmt.Errorf("paper_height_mm must be > 0, got %g", cfg.PaperHeightMM)
+	if err := cfg.paper().Validate(path, "paper_"); err != nil {
+		return nil, nil, err
 	}
 	if cfg.LiftOffZMM < 0 {
 		return nil, nil, fmt.Errorf("lift_off_z_mm must be >= 0 (0 uses the default), got %g", cfg.LiftOffZMM)
@@ -179,19 +233,18 @@ type drawer struct {
 	resource.TriviallyCloseable
 
 	name resource.Name
-	// pageAcross is the unit world direction of the page's +x (left to right).
-	pageAcross         r3.Vector
-	logger             logging.Logger
-	cfg                *Config
-	arm                arm.Arm
-	fsService          framesystem.Service
-	paperTopLeftCorner spatialmath.Pose
-	homePose           spatialmath.Pose
-	strokeGenerator    resource.Resource
-	photo              camera.Camera
-	previewCamera      camera.Camera
-	capturePose        toggleswitch.Switch
-	collisionSpecs     []motionplan.CollisionSpecification
+	// paper is the configured surface; a draw call may bring its own.
+	paper           surface
+	logger          logging.Logger
+	cfg             *Config
+	arm             arm.Arm
+	fsService       framesystem.Service
+	homePose        spatialmath.Pose
+	strokeGenerator resource.Resource
+	photo           camera.Camera
+	previewCamera   camera.Camera
+	capturePose     toggleswitch.Switch
+	collisionSpecs  []motionplan.CollisionSpecification
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -204,6 +257,7 @@ type drawer struct {
 	// held is the job a pause, cancel or failure interrupted, kept so resume can
 	// carry on from nextPolyline. Cleared when a draw finishes.
 	held         []Polyline
+	heldPaper    surface
 	nextPolyline int
 }
 
@@ -329,9 +383,9 @@ func newDrawer(
 	if err != nil {
 		return nil, fmt.Errorf("drawer: get framesystem service: %w", err)
 	}
-	orientation, err := cfg.PaperTopLeftCorner.Orientation.ParseConfig()
+	paper, err := cfg.paper().resolve(logger)
 	if err != nil {
-		return nil, fmt.Errorf("drawer: parse paper_top_left_corner.orientation: %w", err)
+		return nil, fmt.Errorf("drawer: paper_%w", err)
 	}
 	var homePose spatialmath.Pose
 	if cfg.HomePose != nil {
@@ -368,29 +422,19 @@ func newDrawer(
 			return nil, fmt.Errorf("drawer: get capture_pose dep %q: %w", cfg.CapturePose, err)
 		}
 	}
-	pageAcross := r3.Vector{X: 1}
-	if cfg.PaperTopRightCorner != nil {
-		corner := cfg.PaperTopLeftCorner.Translation
-		edge := r3.Vector{X: cfg.PaperTopRightCorner.X - corner.X, Y: cfg.PaperTopRightCorner.Y - corner.Y}
-		pageAcross = edge.Normalize()
-		if l := edge.Norm(); math.Abs(l-cfg.PaperWidthMM) > topEdgeWarnMM {
-			logger.Warnf("drawer: taught top edge is %.1f mm but paper_width_mm is %g; check both corners", l, cfg.PaperWidthMM)
-		}
-	}
 	return &drawer{
-		pageAcross:         pageAcross,
-		name:               conf.ResourceName(),
-		logger:             logger,
-		cfg:                cfg,
-		arm:                a,
-		fsService:          fsService,
-		paperTopLeftCorner: spatialmath.NewPose(cfg.PaperTopLeftCorner.Translation, orientation),
-		homePose:           homePose,
-		strokeGenerator:    gen,
-		photo:              photo,
-		previewCamera:      previewCamera,
-		capturePose:        capturePose,
-		collisionSpecs:     collisionSpecs(cfg.AllowedCollisions),
+		paper:           paper,
+		name:            conf.ResourceName(),
+		logger:          logger,
+		cfg:             cfg,
+		arm:             a,
+		fsService:       fsService,
+		homePose:        homePose,
+		strokeGenerator: gen,
+		photo:           photo,
+		previewCamera:   previewCamera,
+		capturePose:     capturePose,
+		collisionSpecs:  collisionSpecs(cfg.AllowedCollisions),
 	}, nil
 }
 
@@ -407,37 +451,44 @@ type drawArgs struct {
 	// StartAt skips the polylines before it, to carry on a job whose earlier
 	// strokes are already on the paper.
 	StartAt int `json:"start_at,omitempty"`
+	// Paper, when set, is drawn on instead of the configured one.
+	Paper *Paper `json:"paper,omitempty"`
 }
 
-func parseDrawPayload(payload interface{}) ([]Polyline, int, error) {
+func parseDrawPayload(payload interface{}) ([]Polyline, int, *Paper, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return nil, 0, fmt.Errorf("marshal payload: %w", err)
+		return nil, 0, nil, fmt.Errorf("marshal payload: %w", err)
 	}
 	var args drawArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return nil, 0, fmt.Errorf("parse payload: %w", err)
+		return nil, 0, nil, fmt.Errorf("parse payload: %w", err)
 	}
 	if len(args.Polylines) == 0 {
-		return nil, 0, errors.New("polylines is required and must be non-empty")
+		return nil, 0, nil, errors.New("polylines is required and must be non-empty")
 	}
 	if args.StartAt < 0 || args.StartAt >= len(args.Polylines) {
-		return nil, 0, fmt.Errorf("start_at must be in [0, %d), got %d", len(args.Polylines), args.StartAt)
+		return nil, 0, nil, fmt.Errorf("start_at must be in [0, %d), got %d", len(args.Polylines), args.StartAt)
+	}
+	if args.Paper != nil {
+		if err := args.Paper.Validate("", "paper."); err != nil {
+			return nil, 0, nil, err
+		}
 	}
 	out := make([]Polyline, len(args.Polylines))
 	for i, poly := range args.Polylines {
 		if len(poly) == 0 {
-			return nil, 0, fmt.Errorf("polyline %d is empty", i)
+			return nil, 0, nil, fmt.Errorf("polyline %d is empty", i)
 		}
 		out[i] = make(Polyline, len(poly))
 		for j, pt := range poly {
 			if len(pt) != 2 {
-				return nil, 0, fmt.Errorf("polyline %d point %d must have exactly 2 elements, got %d", i, j, len(pt))
+				return nil, 0, nil, fmt.Errorf("polyline %d point %d must have exactly 2 elements, got %d", i, j, len(pt))
 			}
 			out[i][j] = [2]float64{pt[0], pt[1]}
 		}
 	}
-	return out, args.StartAt, nil
+	return out, args.StartAt, args.Paper, nil
 }
 
 func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
@@ -586,7 +637,7 @@ func (d *drawer) statusPhase() string {
 // resume carries on the job a pause, cancel or failure interrupted.
 func (d *drawer) resume(parent context.Context) (map[string]interface{}, error) {
 	d.mu.Lock()
-	held, next := d.held, d.nextPolyline
+	held, next, paper := d.held, d.nextPolyline, d.heldPaper
 	d.mu.Unlock()
 	if held == nil {
 		return nil, errors.New("drawer: nothing to resume")
@@ -596,7 +647,7 @@ func (d *drawer) resume(parent context.Context) (map[string]interface{}, error) 
 		return nil, err
 	}
 	defer release()
-	return d.executeDraw(ctx, held, next)
+	return d.executeDraw(ctx, held, next, paper)
 }
 
 func (d *drawer) pausePending() bool {
@@ -605,9 +656,9 @@ func (d *drawer) pausePending() bool {
 	return d.pauseRequested
 }
 
-func (d *drawer) hold(polylines []Polyline, next int) {
+func (d *drawer) hold(polylines []Polyline, next int, paper surface) {
 	d.mu.Lock()
-	d.held, d.nextPolyline = polylines, next
+	d.held, d.nextPolyline, d.heldPaper = polylines, next, paper
 	d.mu.Unlock()
 }
 
@@ -850,7 +901,7 @@ func (d *drawer) generateStrokes(
 	if err != nil {
 		return nil, fmt.Errorf("drawer: stroke_generator call: %w", err)
 	}
-	polylines, _, err := parseDrawPayload(resp)
+	polylines, _, _, err := parseDrawPayload(resp)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
@@ -889,7 +940,7 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 	}
 
 	if !a.Preview {
-		return d.executeDraw(ctx, polylines, 0)
+		return d.executeDraw(ctx, polylines, 0, d.paper)
 	}
 	resp := map[string]interface{}{
 		"preview":        true,
@@ -905,16 +956,22 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 }
 
 func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
-	polylines, startAt, err := parseDrawPayload(payload)
+	polylines, startAt, override, err := parseDrawPayload(payload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	paper := d.paper
+	if override != nil {
+		if paper, err = override.resolve(d.logger); err != nil {
+			return nil, fmt.Errorf("drawer: paper.%w", err)
+		}
 	}
 	ctx, release, err := d.acquireDrawSlot(parent)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	return d.executeDraw(ctx, polylines, startAt)
+	return d.executeDraw(ctx, polylines, startAt, paper)
 }
 
 // constraints builds the planner constraints for one move: the configured
@@ -993,14 +1050,14 @@ func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zU
 	return out
 }
 
-func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt int) (map[string]interface{}, error) {
+func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt int, paper surface) (map[string]interface{}, error) {
 	fs, err := d.buildFrameSystem(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	corner := d.paperTopLeftCorner.Point()
-	orientation := d.paperTopLeftCorner.Orientation()
+	corner := paper.corner.Point()
+	orientation := paper.corner.Orientation()
 	zDown := corner.Z
 	zUp := corner.Z + d.cfg.LiftOffZMM
 
@@ -1015,11 +1072,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	}
 	d.startDrawing(len(polylines), total)
 	d.advanceDrawing(startAt)
-	d.hold(polylines, startAt)
+	d.hold(polylines, startAt, paper)
 	startedAt := time.Now()
 	drawn, nextProgress := startAt, progressStepPercent
 
-	for _, wp := range drawWaypoints(polylines, startAt, corner, d.pageAcross, zUp, zDown) {
+	for _, wp := range drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown) {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
@@ -1038,7 +1095,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		}
 		drawn++
 		d.advanceDrawing(drawn)
-		d.hold(polylines, drawn)
+		d.hold(polylines, drawn, paper)
 		if drawn < len(polylines) && d.pausePending() {
 			d.logger.Infof("drawer: paused after polyline %d of %d", drawn, len(polylines))
 			if d.hasRestPose() {
@@ -1064,7 +1121,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		}
 	}
 	d.logger.Infof("drawer: finished %d polylines in %s", len(polylines), time.Since(startedAt).Round(time.Second))
-	d.hold(nil, 0)
+	d.hold(nil, 0, surface{})
 
 	if d.hasRestPose() {
 		if err := d.goToRestPose(ctx, fs); err != nil {
