@@ -4,7 +4,7 @@
   // The wire values are snake_case identifiers; these are for reading.
   const LABELS: Record<string, string> = {
     idle: 'Idle',
-    moving_to_capture_pose: 'Moving into position',
+    moving_to_home_pose: 'Moving into position',
     capturing: 'Taking the photo',
     generating_strokes: 'Generating line art',
     drawing: 'Drawing',

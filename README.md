@@ -27,7 +27,10 @@ DoCommand, no image data passing through your hands.
   },
   "paper_width_mm": 215.9,
   "paper_height_mm": 279.4,
-  "capture_pose": "camera-framing",
+  "home_pose": {
+    "translation": { "x": 60, "y": -200, "z": 420 },
+    "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": -1, "th": 0 } }
+  },
   "stroke_generator": "stroke-generator",
   "photo": "photo",
   "preview_camera": "line-preview"
@@ -42,8 +45,7 @@ DoCommand, no image data passing through your hands.
 | `paper_width_mm` | number | **yes** | Paper width. |
 | `paper_height_mm` | number | **yes** | Paper height. |
 | `lift_off_z_mm` | number | no | How far the pen lifts between strokes. Defaults to 5. |
-| `capture_pose` | string | no | An [arm-position-saver](https://github.com/erh/vmodutils) switch holding the pose the arm rests at — the same pose `capture_and_draw` shoots from. Preferred over `home_pose`. |
-| `home_pose` | pose | no | The same idea as `capture_pose`, written as literal tool coordinates. Set one or the other, not both. |
+| `home_pose` | pose | no | The tool pose the arm rests at between drawings. See [The rest pose](#the-rest-pose). |
 | `stroke_generator` | string | no | A `stroke-generator` service. Required for `draw_image` and `capture_and_draw`. |
 | `photo` | string | no | A camera the drawer triggers and reads in `capture_and_draw` — a [frame-buffer](https://github.com/viam-labs/frame-buffer) camera pointed at your real camera. |
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
@@ -104,35 +106,20 @@ Allowances apply to every move the drawer plans, travel and drawing alike.
 
 ### The rest pose
 
-The arm has one pose it lives at between drawings: it starts there, it shoots
-from there, and it returns there when a drawing finishes. Framing a subject and
-parking are the same job, so they are the same pose.
-
-Set it with `capture_pose`, naming an
-[arm-position-saver](https://github.com/erh/vmodutils) switch:
+`home_pose` is where the arm lives between drawings: it returns there when a
+drawing finishes or pauses, `go_home` sends it there, and `capture_and_draw`
+moves there before triggering the photo so the arm is out of the camera's view.
+Teach it by jogging the arm to where it should park and copying the tool pose
+from the arm's card in the app:
 
 ```json
-{
-  "name": "camera-framing",
-  "api": "rdk:component:switch",
-  "model": "erh:vmodutils:arm-position-saver",
-  "attributes": { "arm": "arm-1" }
+"home_pose": {
+  "translation": { "x": 60, "y": -200, "z": 420 },
+  "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": -1, "th": 0 } }
 }
 ```
 
-Teach it by jogging the arm until the camera frames where a subject will sit,
-then setting the switch to **"update config"** — it writes the joint angles into
-its own config. The drawer moves there by setting the switch to **"go to"**.
-
-Leave the switch's `motion` attribute unset so it saves and replays joint
-angles: joint-space is exactly repeatable, and there is nothing to plan around
-on the way back to a pose the arm just came from.
-
-`home_pose` does the same job with literal tool coordinates, and still works.
-Setting both is a config error — pick the one you want to be the source of
-truth.
-
-With neither set, `capture_and_draw` shoots from wherever the arm happens to be
+Without it, `capture_and_draw` shoots with the arm wherever it happens to be
 and logs a warning, and `go_home` returns an error.
 
 ### `capture_and_draw`
@@ -146,7 +133,7 @@ through the stroke generator and onto the paper.
 ```
 
 All the stroke options below are accepted here too. Set `preview` first — the
-arm still moves to the capture pose and takes the photo, but stops there:
+arm still moves to the rest pose and the photo is taken, but it stops there:
 
 ```json
 {"capture_and_draw": {"preview": true}}
@@ -173,8 +160,8 @@ puts you at the keyboard three seconds later, not in front of the camera. Take
 the photo when you are in frame, then draw it. Triggering by gesture does not
 have this problem — you are already in frame when it fires.
 
-With `recapture: false` the arm does not move to the capture pose first, since
-there is nothing to frame.
+With `recapture: false` the arm does not move to the rest pose first, since
+there is no photo to stay out of.
 
 ### `draw_image`
 
@@ -258,7 +245,7 @@ so this is how you find out what is happening — or whether anything is.
 }
 ```
 
-`state` moves through `idle` → `moving_to_capture_pose` → `capturing` →
+`state` moves through `idle` → `moving_to_home_pose` → `capturing` →
 `generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
 (with `last_error`). The counts appear once drawing starts.
 
