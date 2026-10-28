@@ -889,7 +889,7 @@ func TestParseDrawPayload_paperOverride(t *testing.T) {
 	test.That(t, paper, test.ShouldNotBeNil)
 	test.That(t, paper.WidthMM, test.ShouldEqual, 85.9)
 
-	s, err := paper.resolve(logging.NewTestLogger(t))
+	s, err := paper.resolve("paper.")
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, s.corner.Point().X, test.ShouldEqual, 100.0)
 	test.That(t, s.across.Y, test.ShouldAlmostEqual, 1.0)

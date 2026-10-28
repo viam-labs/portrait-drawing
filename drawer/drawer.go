@@ -140,19 +140,26 @@ type surface struct {
 	across r3.Vector
 }
 
-func (p *Paper) resolve(logger logging.Logger) (surface, error) {
+// CheckTopEdge warns when the taught top edge disagrees with width_mm. Services
+// call it once at startup; resolve runs on every draw and stays quiet.
+func (p *Paper) CheckTopEdge(logger logging.Logger, prefix string) {
+	if p.TopRightCorner == nil {
+		return
+	}
+	if l := topEdgeLength(p.TopLeftCorner.Translation, *p.TopRightCorner); math.Abs(l-p.WidthMM) > topEdgeWarnMM {
+		logger.Warnf("taught top edge is %.1f mm but %swidth_mm is %g; check both corners", l, prefix, p.WidthMM)
+	}
+}
+
+func (p *Paper) resolve(prefix string) (surface, error) {
 	orientation, err := p.TopLeftCorner.Orientation.ParseConfig()
 	if err != nil {
-		return surface{}, fmt.Errorf("parse top_left_corner.orientation: %w", err)
+		return surface{}, fmt.Errorf("parse %stop_left_corner.orientation: %w", prefix, err)
 	}
 	across := r3.Vector{X: 1}
 	if p.TopRightCorner != nil {
 		corner := p.TopLeftCorner.Translation
-		edge := r3.Vector{X: p.TopRightCorner.X - corner.X, Y: p.TopRightCorner.Y - corner.Y}
-		across = edge.Normalize()
-		if l := edge.Norm(); math.Abs(l-p.WidthMM) > topEdgeWarnMM {
-			logger.Warnf("drawer: taught top edge is %.1f mm but width_mm is %g; check both corners", l, p.WidthMM)
-		}
+		across = r3.Vector{X: p.TopRightCorner.X - corner.X, Y: p.TopRightCorner.Y - corner.Y}.Normalize()
 	}
 	return surface{corner: spatialmath.NewPose(p.TopLeftCorner.Translation, orientation), across: across}, nil
 }
@@ -383,9 +390,10 @@ func newDrawer(
 	if err != nil {
 		return nil, fmt.Errorf("drawer: get framesystem service: %w", err)
 	}
-	paper, err := cfg.paper().resolve(logger)
+	cfg.paper().CheckTopEdge(logger, "paper_")
+	paper, err := cfg.paper().resolve("paper_")
 	if err != nil {
-		return nil, fmt.Errorf("drawer: paper_%w", err)
+		return nil, fmt.Errorf("drawer: %w", err)
 	}
 	var homePose spatialmath.Pose
 	if cfg.HomePose != nil {
@@ -962,8 +970,8 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 	}
 	paper := d.paper
 	if override != nil {
-		if paper, err = override.resolve(d.logger); err != nil {
-			return nil, fmt.Errorf("drawer: paper.%w", err)
+		if paper, err = override.resolve("paper."); err != nil {
+			return nil, fmt.Errorf("drawer: %w", err)
 		}
 	}
 	ctx, release, err := d.acquireDrawSlot(parent)

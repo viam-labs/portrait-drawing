@@ -175,6 +175,7 @@ func newWithClients(name resource.Name, logger logging.Logger, cfg *Config, draw
 	if cfg.Fill == 0 {
 		cfg.Fill = defaultFill
 	}
+	cfg.paper().CheckTopEdge(logger, "paper_")
 	return &textWriter{name: name, logger: logger, cfg: cfg, drawer: drawer, run: run}
 }
 

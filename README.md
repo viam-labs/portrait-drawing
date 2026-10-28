@@ -307,7 +307,10 @@ whenever one was interrupted — by `pause`, `cancel`, or a failure part-way, in
 which case the stroke that failed is redrawn — until a draw finishes, and
 `status` shows `"resumable": true` while it does. `capture_and_draw` and
 `draw_image` jobs resume the same way. The held job lives in memory: after a
-restart, resend the polylines with `draw` and `start_at`.
+restart, resend the polylines with `draw` and `start_at`. A `draw` with a
+`paper` override also replaces the held job, so a portrait paused on the drawer
+directly cannot be `resume`d once a name tag has been drawn in between; resend
+it with `start_at` instead, as the reception queue does.
 
 ### `cancel` and `go_home`
 
