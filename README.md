@@ -524,9 +524,10 @@ the quick way to check a font or a size without an arm:
 
 ## `viam:portrait-drawing:reception-queue`
 
-Runs a reception desk's jobs on one arm: name tags, which a visitor needs before
-their host arrives, and portraits, which can wait until they leave. It owns the
-order; the drawer and the name-tag writer each just do one job when asked.
+Runs a reception desk's jobs on one arm: name tags and other short text cards,
+which a visitor needs before their host arrives, and portraits, which can wait
+until they leave. It owns the order; the drawer and the name-tag writer each
+just do one job when asked.
 
 ### Configuration
 
@@ -548,17 +549,17 @@ order; the drawer and the name-tag writer each just do one job when asked.
 | `drawer` | string | **yes** | The `drawer` that draws portraits. |
 | `stroke_generator` | string | **yes** | Turns each portrait photo into strokes when it is queued. |
 | `photo` | string | no | A [frame-buffer](https://github.com/viam-labs/frame-buffer) camera over the visitor-facing webcam. `enqueue_portrait` without `image_b64` draws the frame it holds, then clears it. |
-| `name_tag_writer` | string | no | A service that writes a name tag, such as a [`text-writer`](#viamportrait-drawingtext-writer). Without it, `enqueue_name_tag` is refused. |
+| `name_tag_writer` | string | no | A service that writes a name tag, such as a [`text-writer`](#viamportrait-drawingtext-writer). `enqueue_text` jobs go to it too. Without it, both are refused. |
 | `name_tag_command` | object | no | The DoCommand sent to `name_tag_writer`; every `{name}` in a string value is replaced with the visitor's name. Default `{"write": {"text": "{name}"}}`. |
 | `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
 | `state_file` | string | no | Where jobs are saved. Default a file named after the service in `$VIAM_MODULE_DATA`. |
 
 ### Behavior and caveats
 
-- **Name tags first.** A waiting name tag always runs before any portrait. If a
-  portrait is drawing when one arrives, the queue `pause`s the drawer — the stroke
-  in progress finishes and the arm returns to rest — writes the tag, and then
-  resumes the portrait from the next stroke.
+- **Cards first.** A waiting name tag or text job always runs before any
+  portrait. If a portrait is drawing when one arrives, the queue `pause`s the
+  drawer — the stroke in progress finishes and the arm returns to rest — writes
+  the card, and then resumes the portrait from the next stroke.
 - **The name-tag writer must block until it is done.** The queue treats the
   writer's DoCommand returning as "the tag is finished and the pen is up", and
   resumes the portrait straight after.
@@ -581,8 +582,9 @@ order; the drawer and the name-tag writer each just do one job when asked.
 |---|---|---|
 | `enqueue_portrait` | `{"name": "Ada", "visitor": {…}}`, plus `"image_b64": "…"` to send the photo instead of reading `photo` | `{"job_id", "position"}` |
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
+| `enqueue_text` | `{"text": "Welcome", "cap_height_mm": 12, "fill": 0.6, "visitor": {…}}`; sent to the writer as `{"write": {"text", "cap_height_mm", "fill"}}`, bypassing `name_tag_command` | `{"job_id", "position"}` |
 | `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
-| `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits |
+| `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits, `text` for text jobs |
 | `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
 
