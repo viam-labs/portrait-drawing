@@ -125,6 +125,7 @@ type Job struct {
 	Visitor      map[string]interface{} `json:"visitor,omitempty"`
 	State        string                 `json:"state"`
 	Polylines    [][][2]float64         `json:"polylines,omitempty"`
+	Total        int                    `json:"polylines_total,omitempty"`
 	NextPolyline int                    `json:"next_polyline,omitempty"`
 	Error        string                 `json:"error,omitempty"`
 	CreatedAt    time.Time              `json:"created_at"`
@@ -317,7 +318,7 @@ func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]in
 	}
 	job := &Job{
 		ID: newID(), Kind: kindPortrait, Name: str(args, "name"), Visitor: visitorOf(args),
-		State: stateQueued, Polylines: polylines, CreatedAt: time.Now(),
+		State: stateQueued, Polylines: polylines, Total: len(polylines), CreatedAt: time.Now(),
 	}
 	return q.add(job)
 }
@@ -435,7 +436,7 @@ func summary(j *Job) map[string]interface{} {
 		out["visitor"] = j.Visitor
 	}
 	if j.Kind == kindPortrait {
-		out["polylines_total"] = len(j.Polylines)
+		out["polylines_total"] = j.Total
 		out["polylines_done"] = j.NextPolyline
 	}
 	if j.Error != "" {
@@ -712,6 +713,9 @@ func (q *receptionQueue) load() error {
 		return fmt.Errorf("reception-queue: parse %s: %w", q.stateFile, err)
 	}
 	for _, j := range jobs {
+		if j.Total == 0 {
+			j.Total = len(j.Polylines)
+		}
 		// Whatever was running when the module stopped resumes rather than restarts.
 		if j.State == stateActive {
 			if j.Kind == kindPortrait {

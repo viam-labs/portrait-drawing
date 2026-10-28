@@ -241,6 +241,10 @@ func TestPortraitIsDrawnAndThePhotoIsNotKept(t *testing.T) {
 	test.That(t, strings.Contains(string(raw), "SECRET-PHOTO"), test.ShouldBeFalse)
 
 	h.drawUntil(t, id, stateDone)
+	s, err := h.q.jobSummary(id)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["polylines_total"], test.ShouldEqual, 6)
+	test.That(t, s["polylines_done"], test.ShouldEqual, 6)
 	h.drawer.mu.Lock()
 	defer h.drawer.mu.Unlock()
 	test.That(t, h.drawer.starts, test.ShouldResemble, []int{0})
@@ -307,6 +311,7 @@ func TestARestartResumesAnInterruptedPortrait(t *testing.T) {
 	test.That(t, q.load(), test.ShouldBeNil)
 	s, _ := q.jobSummary("abc")
 	test.That(t, s["state"], test.ShouldEqual, statePaused)
+	test.That(t, s["polylines_total"], test.ShouldEqual, 6)
 
 	q.start()
 	defer func() { test.That(t, q.Close(context.Background()), test.ShouldBeNil) }()
