@@ -561,7 +561,10 @@ just do one job when asked.
   an active portrait's progress every couple of seconds, so after a restart it
   resumes within a stroke or two of where the pen stopped.
 - **Failures wait for a person.** A failed job stays `failed` with its error, and
-  `retry_job` puts it back — a portrait from the stroke it stopped at.
+  `retry_job` puts it back — a portrait from the stroke it stopped at, a name tag
+  or text card from the start. Text can't resume mid-letter, so a card
+  interrupted by a restart is failed rather than rewritten over the partly
+  written card; replace the card before retrying it.
 
 ### DoCommand
 
@@ -572,7 +575,7 @@ just do one job when asked.
 | `enqueue_text` | `{"text": "Welcome", "cap_height_mm": 12, "fill": 0.6, "visitor": {…}}`; sent to the writer as `{"write": {"text", "cap_height_mm", "fill"}}`, bypassing `name_tag_command` | `{"job_id", "position"}` |
 | `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
 | `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits, `text` for text jobs |
-| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait is stopped |
+| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or card is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
 
 `visitor` is stored with the job and returned in summaries, for whatever tells the
