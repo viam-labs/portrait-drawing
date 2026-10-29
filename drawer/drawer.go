@@ -56,6 +56,9 @@ type Config struct {
 	LiftOffZMM          float64    `json:"lift_off_z_mm,omitempty"`
 	// HomePose, if set, is the tool pose the arm rests at between drawings.
 	HomePose *PoseConfig `json:"home_pose,omitempty"`
+	// RemovedCapturePose is read only so Validate can reject it: an old config
+	// that still sets capture_pose would otherwise lose its rest pose silently.
+	RemovedCapturePose string `json:"capture_pose,omitempty"`
 	// AllowedCollisions lists frame pairs the planner should not treat as a
 	// collision. Anything bolted to the arm — a wrist camera, a pen holder —
 	// overlaps the link it is mounted on in every configuration, which the
@@ -191,6 +194,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.LiftOffZMM < 0 {
 		return nil, nil, fmt.Errorf("lift_off_z_mm must be >= 0 (0 uses the default), got %g", cfg.LiftOffZMM)
+	}
+	if cfg.RemovedCapturePose != "" {
+		return nil, nil, errors.New("capture_pose was removed; set home_pose to the tool pose the arm rests at instead")
 	}
 	if cfg.HomePose != nil && cfg.HomePose.Orientation == nil {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "home_pose.orientation")

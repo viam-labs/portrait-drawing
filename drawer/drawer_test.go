@@ -389,6 +389,19 @@ func TestDrawOrPreview_returnsBase64WhenNoPreviewCamera(t *testing.T) {
 	test.That(t, hasCamera, test.ShouldBeFalse)
 }
 
+func TestConfigValidate_rejectsRemovedCapturePose(t *testing.T) {
+	cfg := &Config{
+		Arm:                "my-arm",
+		PaperTopLeftCorner: validCorner(),
+		PaperWidthMM:       100,
+		PaperHeightMM:      60,
+		RemovedCapturePose: "camera-framing",
+	}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "home_pose")
+}
+
 func TestGoToRestPose_noneConfigured(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
 	test.That(t, d.hasRestPose(), test.ShouldBeFalse)
