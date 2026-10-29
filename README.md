@@ -10,6 +10,10 @@ Two services work together:
 - **`viam:portrait-drawing:drawer`** — takes polylines and draws them, lifting
   the pen between strokes.
 
+Two more build on them: **`text-writer`** writes a line of text, such as a name
+tag, through a drawer, and **`reception-queue`** runs name tags and portraits on
+one arm in the right order.
+
 The drawer can drive the whole loop itself: pose the arm so its camera frames
 the subject, take the photo, generate the strokes, and draw the result — one
 DoCommand, no image data passing through your hands.
@@ -27,7 +31,10 @@ DoCommand, no image data passing through your hands.
   },
   "paper_width_mm": 215.9,
   "paper_height_mm": 279.4,
-  "capture_pose": "camera-framing",
+  "home_pose": {
+    "translation": { "x": 60, "y": -200, "z": 420 },
+    "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": -1, "th": 0 } }
+  },
   "stroke_generator": "stroke-generator",
   "photo": "photo",
   "preview_camera": "line-preview"
@@ -42,8 +49,7 @@ DoCommand, no image data passing through your hands.
 | `paper_width_mm` | number | **yes** | Paper width. |
 | `paper_height_mm` | number | **yes** | Paper height. |
 | `lift_off_z_mm` | number | no | How far the pen lifts between strokes. Defaults to 5. |
-| `capture_pose` | string | no | An [arm-position-saver](https://github.com/erh/vmodutils) switch holding the pose the arm rests at — the same pose `capture_and_draw` shoots from. Preferred over `home_pose`. |
-| `home_pose` | pose | no | The same idea as `capture_pose`, written as literal tool coordinates. Set one or the other, not both. |
+| `home_pose` | pose | no | The tool pose the arm rests at between drawings. See [The rest pose](#the-rest-pose). |
 | `stroke_generator` | string | no | A `stroke-generator` service. Required for `draw_image` and `capture_and_draw`. |
 | `photo` | string | no | A camera the drawer triggers and reads in `capture_and_draw` — a [frame-buffer](https://github.com/viam-labs/frame-buffer) camera pointed at your real camera. |
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
@@ -104,35 +110,20 @@ Allowances apply to every move the drawer plans, travel and drawing alike.
 
 ### The rest pose
 
-The arm has one pose it lives at between drawings: it starts there, it shoots
-from there, and it returns there when a drawing finishes. Framing a subject and
-parking are the same job, so they are the same pose.
-
-Set it with `capture_pose`, naming an
-[arm-position-saver](https://github.com/erh/vmodutils) switch:
+`home_pose` is where the arm lives between drawings: it returns there when a
+drawing finishes or pauses, `go_home` sends it there, and `capture_and_draw`
+moves there before triggering the photo so the arm is out of the camera's view.
+Teach it by jogging the arm to where it should park and copying the tool pose
+from the arm's card in the app:
 
 ```json
-{
-  "name": "camera-framing",
-  "api": "rdk:component:switch",
-  "model": "erh:vmodutils:arm-position-saver",
-  "attributes": { "arm": "arm-1" }
+"home_pose": {
+  "translation": { "x": 60, "y": -200, "z": 420 },
+  "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": -1, "th": 0 } }
 }
 ```
 
-Teach it by jogging the arm until the camera frames where a subject will sit,
-then setting the switch to **"update config"** — it writes the joint angles into
-its own config. The drawer moves there by setting the switch to **"go to"**.
-
-Leave the switch's `motion` attribute unset so it saves and replays joint
-angles: joint-space is exactly repeatable, and there is nothing to plan around
-on the way back to a pose the arm just came from.
-
-`home_pose` does the same job with literal tool coordinates, and still works.
-Setting both is a config error — pick the one you want to be the source of
-truth.
-
-With neither set, `capture_and_draw` shoots from wherever the arm happens to be
+Without it, `capture_and_draw` shoots with the arm wherever it happens to be
 and logs a warning, and `go_home` returns an error.
 
 ### `capture_and_draw`
@@ -146,7 +137,7 @@ through the stroke generator and onto the paper.
 ```
 
 All the stroke options below are accepted here too. Set `preview` first — the
-arm still moves to the capture pose and takes the photo, but stops there:
+arm still moves to the rest pose and the photo is taken, but it stops there:
 
 ```json
 {"capture_and_draw": {"preview": true}}
@@ -173,8 +164,8 @@ puts you at the keyboard three seconds later, not in front of the camera. Take
 the photo when you are in frame, then draw it. Triggering by gesture does not
 have this problem — you are already in frame when it fires.
 
-With `recapture: false` the arm does not move to the capture pose first, since
-there is nothing to frame.
+With `recapture: false` the arm does not move to the rest pose first, since
+there is no photo to stay out of.
 
 ### `draw_image`
 
@@ -237,6 +228,21 @@ no longer holds the job itself:
 {"draw": {"polylines": [...], "start_at": 37}}
 ```
 
+`paper` draws on another surface instead of the configured one, for a service
+with its own workspace under this arm. It takes the same fields as the config,
+without the `paper_` prefix:
+
+```json
+{"draw": {"polylines": [...], "paper": {
+  "top_left_corner": {"translation": {…}, "orientation": {…}},
+  "top_right_corner": {"x": 0, "y": 0, "z": 0},
+  "width_mm": 85.9, "height_mm": 59.2
+}}}
+```
+
+This is how the [`text-writer`](#viamportrait-drawingtext-writer) puts a name
+on a card beside the portrait paper.
+
 ### `status`
 
 A drawing runs for minutes with the DoCommand that started it still outstanding,
@@ -258,7 +264,7 @@ so this is how you find out what is happening — or whether anything is.
 }
 ```
 
-`state` moves through `idle` → `moving_to_capture_pose` → `capturing` →
+`state` moves through `idle` → `moving_to_home_pose` → `capturing` →
 `generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
 (with `last_error`). The counts appear once drawing starts.
 
@@ -288,7 +294,10 @@ whenever one was interrupted — by `pause`, `cancel`, or a failure part-way, in
 which case the stroke that failed is redrawn — until a draw finishes, and
 `status` shows `"resumable": true` while it does. `capture_and_draw` and
 `draw_image` jobs resume the same way. The held job lives in memory: after a
-restart, resend the polylines with `draw` and `start_at`.
+restart, resend the polylines with `draw` and `start_at`. A `draw` with a
+`paper` override also replaces the held job, so a portrait paused on the drawer
+directly cannot be `resume`d once a name tag has been drawn in between; resend
+it with `start_at` instead, as the reception queue does.
 
 ### `cancel` and `go_home`
 
@@ -425,11 +434,87 @@ The `lines` tuning attributes, `isolate_subject` and the depth band do not apply
 `{"polylines": [[[x, y], …], …]}` in paper-local mm — exactly the shape the
 drawer's `draw` verb accepts.
 
+## `viam:portrait-drawing:text-writer`
+
+Writes a line of text on a card — a name on a name tag — through a drawer. It
+lays the text out as polylines in card-local mm, hands them to the drawer's
+`draw` verb along with where the card is, and returns when the drawer does,
+pen up. That blocking contract is what the reception queue's `name_tag_writer`
+expects, so this service is the one to name there.
+
+The card is the writer's own surface. The drawer's paper stays where portraits
+go; the card sits in a second workspace under the same arm, a feeder's output
+tray say, and the writer carries its corners into every draw.
+
+### Configuration
+
+```json
+{
+  "drawer": "drawer",
+  "paper_top_left_corner": {
+    "translation": { "x": 120, "y": -260, "z": 266 },
+    "orientation": { "type": "ov_degrees", "value": { "x": 0, "y": 0, "z": -1, "th": 0 } }
+  },
+  "paper_top_right_corner": { "x": 120, "y": -174.1, "z": 266 },
+  "paper_width_mm": 85.9,
+  "paper_height_mm": 59.2
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `drawer` | string | **yes** | The `drawer` whose arm writes the card. |
+| `paper_top_left_corner` | pose | **yes** | The tool pose with the pen tip on the card's top-left corner, as its reader sees it. Taught the same way as the drawer's; see [Which corner is top-left](#which-corner-is-top-left). |
+| `paper_top_right_corner` | position | no | Where the pen tip touches the card's top-right corner. Sets which way the text runs; without it the card runs along the arm's +X. |
+| `paper_width_mm`, `paper_height_mm` | number | **yes** | The card. |
+| `fill` | number | no | Fraction of the card the text fills on whichever axis binds first. Default `0.8`. A long name is limited by the card's width, a short one by its height. |
+| `cap_height_mm` | number | no | Fix the capital height instead of filling. Text that would overflow the card at that height is refused rather than drawn off the edge. |
+| `stroke_font` | string | no | A single-stroke [Hershey](https://en.wikipedia.org/wiki/Hershey_fonts) face. Default `cursive`, a joined-up script; `futural` is a plain sans, `rowmans` and `timesr` are seriffed. |
+| `join` | bool | no | Keep the pen down between the letters of a script face, so a word is one stroke. Default true. Word spaces stay as lifts. |
+| `outline` | bool | no | Trace TTF outlines from `font` instead of a stroke font. A TTF describes the boundary of each letter, so this draws hollow letters, at three times the points. |
+| `font` | string | no | TTF family for `outline`. Default tries Helvetica, then its metric-compatible clones. |
+| `spacing_mm` | number | no | Spacing of the points along each stroke. Default `2`. |
+
+One drawer serves both surfaces. The queue pauses a portrait before a tag is
+written, the writer draws on the card through the same drawer, and the drawer
+returns to its rest pose after each. Nothing moves the card into place: the
+geometry assumes the next card is wherever the last one was, which is what a
+card feeder provides.
+
+Sizing is in the writer's hands rather than the caller's because the card is
+fixed and the names are not: with `fill`, "Ada Lovelace" and "Al" each take as
+much of the card as they can, which is not the same height.
+
+### `write`
+
+```json
+{"write": {"text": "Ada Lovelace"}}
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `text` | string | What to write. Required. |
+| `cap_height_mm`, `fill` | number | Override the configured sizing for this call. |
+| `preview` | bool | Lay the text out and return the polylines without drawing. |
+
+Returns the drawer's response plus the layout: `font`, `cap_mm`, the inked
+`bbox_w_mm` x `bbox_h_mm`, and `polylines_total`. A drawer that is paused
+part-way returns with the pen up and the text unfinished; the writer reports
+that as an error rather than a written tag.
+
+`python/text_to_polylines.py` does the layout and runs on its own, which is
+the quick way to check a font or a size without an arm:
+
+```bash
+.venv/bin/python python/text_to_polylines.py --text "Ada Lovelace" --width-mm 85.9 --height-mm 59.2
+```
+
 ## `viam:portrait-drawing:reception-queue`
 
-Runs a reception desk's jobs on one arm: name tags, which a visitor needs before
-their host arrives, and portraits, which can wait until they leave. It owns the
-order; the drawer and the name-tag writer each just do one job when asked.
+Runs a reception desk's jobs on one arm: name tags and other short text cards,
+which a visitor needs before their host arrives, and portraits, which can wait
+until they leave. It owns the order; the drawer and the name-tag writer each
+just do one job when asked.
 
 ### Configuration
 
@@ -438,7 +523,7 @@ order; the drawer and the name-tag writer each just do one job when asked.
   "drawer": "drawer",
   "stroke_generator": "stroke-generator",
   "photo": "visitor-photo",
-  "name_tag_writer": "font-writer",
+  "name_tag_writer": "text-writer",
   "name_tag_command": { "write": { "text": "{name}", "cap_height_mm": 12 } },
   "paper_width_mm": 101.6,
   "paper_height_mm": 152.4,
@@ -451,17 +536,17 @@ order; the drawer and the name-tag writer each just do one job when asked.
 | `drawer` | string | **yes** | The `drawer` that draws portraits. |
 | `stroke_generator` | string | **yes** | Turns each portrait photo into strokes when it is queued. |
 | `photo` | string | no | A [frame-buffer](https://github.com/viam-labs/frame-buffer) camera over the visitor-facing webcam. `enqueue_portrait` without `image_b64` draws the frame it holds, then clears it. |
-| `name_tag_writer` | string | no | A service that writes a name tag. Without it, `enqueue_name_tag` is refused. |
+| `name_tag_writer` | string | no | A service that writes a name tag, such as a [`text-writer`](#viamportrait-drawingtext-writer). `enqueue_text` jobs go to it too. Without it, both are refused. |
 | `name_tag_command` | object | no | The DoCommand sent to `name_tag_writer`; every `{name}` in a string value is replaced with the visitor's name. Default `{"write": {"text": "{name}"}}`. |
 | `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
 | `state_file` | string | no | Where jobs are saved. Default a file named after the service in `$VIAM_MODULE_DATA`. |
 
 ### Behavior and caveats
 
-- **Name tags first.** A waiting name tag always runs before any portrait. If a
-  portrait is drawing when one arrives, the queue `pause`s the drawer — the stroke
-  in progress finishes and the arm returns to rest — writes the tag, and then
-  resumes the portrait from the next stroke.
+- **Cards first.** A waiting name tag or text job always runs before any
+  portrait. If a portrait is drawing when one arrives, the queue `pause`s the
+  drawer — the stroke in progress finishes and the arm returns to rest — writes
+  the card, and then resumes the portrait from the next stroke.
 - **The name-tag writer must block until it is done.** The queue treats the
   writer's DoCommand returning as "the tag is finished and the pen is up", and
   resumes the portrait straight after.
@@ -477,9 +562,9 @@ order; the drawer and the name-tag writer each just do one job when asked.
   resumes within a stroke or two of where the pen stopped.
 - **Failures wait for a person.** A failed job stays `failed` with its error, and
   `retry_job` puts it back — a portrait from the stroke it stopped at, a name tag
-  from the start. A name tag can't resume mid-letter, so one interrupted by a
-  restart is failed rather than rewritten over the partly written card; replace
-  the card before retrying it.
+  or text card from the start. Text can't resume mid-letter, so a card
+  interrupted by a restart is failed rather than rewritten over the partly
+  written card; replace the card before retrying it.
 
 ### DoCommand
 
@@ -487,9 +572,10 @@ order; the drawer and the name-tag writer each just do one job when asked.
 |---|---|---|
 | `enqueue_portrait` | `{"name": "Ada", "visitor": {…}}`, plus `"image_b64": "…"` to send the photo instead of reading `photo` | `{"job_id", "position"}` |
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
+| `enqueue_text` | `{"text": "Welcome", "cap_height_mm": 12, "fill": 0.6, "visitor": {…}}`; sent to the writer as `{"write": {"text", "cap_height_mm", "fill"}}`, bypassing `name_tag_command` | `{"job_id", "position"}` |
 | `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
-| `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits |
-| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or name tag is stopped |
+| `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits, `text` for text jobs |
+| `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or card is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
 
 `visitor` is stored with the job and returned in summaries, for whatever tells the

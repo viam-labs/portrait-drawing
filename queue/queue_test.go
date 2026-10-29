@@ -287,6 +287,34 @@ func TestNameTagsGoBeforeWaitingPortraits(t *testing.T) {
 	test.That(t, s["state"], test.ShouldEqual, stateActive)
 }
 
+func TestTextJobIsWrittenWithItsOwnSizingBeforePortraits(t *testing.T) {
+	h := newHarness(t)
+	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_text", map[string]interface{}{
+		"text": " Welcome ", "cap_height_mm": 12.0, "preview": true, "visitor": map[string]interface{}{"id": "v1"},
+	})
+
+	s, err := h.q.jobSummary(id)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["kind"], test.ShouldEqual, kindText)
+	test.That(t, s["text"], test.ShouldEqual, "Welcome")
+	test.That(t, s["position"], test.ShouldEqual, 1)
+
+	h.q.start()
+	select {
+	case text := <-h.writer.wrote:
+		test.That(t, text, test.ShouldEqual, "Welcome")
+	case <-time.After(2 * time.Second):
+		t.Fatal("text was not written first")
+	}
+	h.waitState(t, id, stateDone)
+	h.writer.mu.Lock()
+	defer h.writer.mu.Unlock()
+	test.That(t, h.writer.cmds[0], test.ShouldResemble, map[string]interface{}{
+		"write": map[string]interface{}{"text": "Welcome", "cap_height_mm": 12.0},
+	})
+}
+
 func TestNameTagPausesThePortraitThenItResumesWhereItStopped(t *testing.T) {
 	h := newHarness(t)
 	h.q.start()
@@ -384,10 +412,18 @@ func TestEnqueueValidation(t *testing.T) {
 	test.That(t, err, test.ShouldNotBeNil)
 	_, err = h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_name_tag": map[string]interface{}{"name": "  "}})
 	test.That(t, err, test.ShouldNotBeNil)
+	_, err = h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_text": map[string]interface{}{"text": "  "}})
+	test.That(t, err, test.ShouldNotBeNil)
+	_, err = h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_text": map[string]interface{}{"text": "Hi", "fill": "big"}})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "fill")
 
 	noWriter := newWithClients(generic.Named("q"), logging.NewTestLogger(t), newFakeDrawer(), &fakeGenerator{}, nil, &Config{},
 		filepath.Join(t.TempDir(), "q.json"))
 	_, err = noWriter.DoCommand(context.Background(), map[string]interface{}{"enqueue_name_tag": map[string]interface{}{"name": "Ada"}})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "name_tag_writer")
+	_, err = noWriter.DoCommand(context.Background(), map[string]interface{}{"enqueue_text": map[string]interface{}{"text": "Hi"}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "name_tag_writer")
 }
@@ -519,8 +555,20 @@ func TestCancelStopsANameTagBeingWritten(t *testing.T) {
 }
 
 func TestARestartFailsAnInterruptedNameTagInsteadOfRewritingIt(t *testing.T) {
+	restartFailsAnInterruptedCard(t, &Job{ID: "tag", Kind: kindNameTag, Name: "Ada", State: stateActive, CreatedAt: time.Now()})
+}
+
+func TestARestartFailsAnInterruptedTextCardInsteadOfRewritingIt(t *testing.T) {
+	restartFailsAnInterruptedCard(t, &Job{
+		ID: "tag", Kind: kindText, State: stateActive, CreatedAt: time.Now(),
+		Write: map[string]interface{}{"text": "Welcome"},
+	})
+}
+
+func restartFailsAnInterruptedCard(t *testing.T, job *Job) {
+	t.Helper()
 	state := filepath.Join(t.TempDir(), "queue.json")
-	raw, _ := json.Marshal([]*Job{{ID: "tag", Kind: kindNameTag, Name: "Ada", State: stateActive, CreatedAt: time.Now()}})
+	raw, _ := json.Marshal([]*Job{job})
 	test.That(t, os.WriteFile(state, raw, 0o600), test.ShouldBeNil)
 
 	writer := &fakeWriter{wrote: make(chan string, 1)}

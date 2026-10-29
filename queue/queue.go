@@ -1,5 +1,6 @@
 // Package queue implements a Viam generic service that runs a reception desk's
-// drawing jobs on one arm: name tags first, portraits when no tag is waiting.
+// drawing jobs on one arm: name tags and text cards first, portraits when no
+// card is waiting.
 package queue
 
 import (
@@ -40,6 +41,7 @@ func init() {
 const (
 	kindPortrait = "portrait"
 	kindNameTag  = "name_tag"
+	kindText     = "text"
 
 	stateQueued   = "queued"
 	stateActive   = "active"
@@ -52,10 +54,10 @@ const (
 	defaultPaperHeightMM = 152.4
 	defaultMarginMM      = 8.0
 
-	// interruptedTag is the error an interrupted name tag is failed with: a
-	// name cannot resume mid-letter, and writing it again would go over the
-	// partly written card.
-	interruptedTag = "interrupted while writing; the card may be partly written, so replace it before retry_job"
+	// interruptedCard is the error an interrupted card is failed with: text
+	// cannot resume mid-letter, and writing it again would go over the partly
+	// written card.
+	interruptedCard = "interrupted while writing; the card may be partly written, so replace it before retry_job"
 
 	// progressPoll is how often an active portrait's progress is saved, so a
 	// restart resumes close to where the pen stopped.
@@ -74,8 +76,8 @@ type Config struct {
 	// Photo is a frame-buffer camera holding the visitor's photo. enqueue_portrait
 	// without image_b64 reads it, then clears it.
 	Photo string `json:"photo,omitempty"`
-	// NameTagWriter writes name tags. Optional: without it, name tags are
-	// refused at enqueue.
+	// NameTagWriter writes name tags and text jobs. Optional: without it, both
+	// are refused at enqueue.
 	NameTagWriter string `json:"name_tag_writer,omitempty"`
 	// NameTagCommand is the DoCommand sent to NameTagWriter. Every string value
 	// has "{name}" replaced with the visitor's name. It must block until the
@@ -122,12 +124,14 @@ type commander interface {
 	DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error)
 }
 
-// Job is one name tag or portrait. Portraits carry their strokes, never the photo.
+// Job is one name tag, text line, or portrait. Portraits carry their strokes, never the photo.
 type Job struct {
-	ID           string                 `json:"id"`
-	Kind         string                 `json:"kind"`
-	Name         string                 `json:"name,omitempty"`
-	Visitor      map[string]interface{} `json:"visitor,omitempty"`
+	ID      string                 `json:"id"`
+	Kind    string                 `json:"kind"`
+	Name    string                 `json:"name,omitempty"`
+	Visitor map[string]interface{} `json:"visitor,omitempty"`
+	// Write is a text job's payload for the writer's write verb.
+	Write        map[string]interface{} `json:"write,omitempty"`
 	State        string                 `json:"state"`
 	Polylines    [][][2]float64         `json:"polylines,omitempty"`
 	Total        int                    `json:"polylines_total,omitempty"`
@@ -159,8 +163,8 @@ type receptionQueue struct {
 	wake    chan struct{}
 	preempt chan struct{}
 
-	// cancelTag stops the name tag being written, so cancel_job can stop it.
-	cancelTag context.CancelFunc
+	// cancelCard stops the card being written, so cancel_job can stop it.
+	cancelCard context.CancelFunc
 
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
@@ -274,6 +278,8 @@ func (q *receptionQueue) DoCommand(ctx context.Context, cmd map[string]interface
 		return q.enqueuePortrait(ctx, args)
 	case "enqueue_name_tag":
 		return q.enqueueNameTag(args)
+	case "enqueue_text":
+		return q.enqueueText(args)
 	case "status":
 		return q.status(), nil
 	case "job":
@@ -284,7 +290,7 @@ func (q *receptionQueue) DoCommand(ctx context.Context, cmd map[string]interface
 		return q.retryJob(str(args, "job_id"))
 	default:
 		return nil, fmt.Errorf("reception-queue: unknown verb %q; expected \"enqueue_portrait\", \"enqueue_name_tag\", "+
-			"\"status\", \"job\", \"cancel_job\", or \"retry_job\"", v)
+			"\"enqueue_text\", \"status\", \"job\", \"cancel_job\", or \"retry_job\"", v)
 	}
 }
 
@@ -367,6 +373,39 @@ func (q *receptionQueue) enqueueNameTag(args map[string]interface{}) (map[string
 		return nil, errors.New("reception-queue: enqueue_name_tag needs name")
 	}
 	job := &Job{ID: newID(), Kind: kindNameTag, Name: name, Visitor: visitorOf(args), State: stateQueued, CreatedAt: time.Now()}
+	return q.addCard(job)
+}
+
+// enqueueText queues a line of text for the writer. Only the write verb's
+// sizing options pass through, so a caller cannot turn the job into a preview.
+func (q *receptionQueue) enqueueText(args map[string]interface{}) (map[string]interface{}, error) {
+	if q.writer == nil {
+		return nil, errors.New("reception-queue: no name_tag_writer is configured")
+	}
+	text := strings.TrimSpace(str(args, "text"))
+	if text == "" {
+		return nil, errors.New("reception-queue: enqueue_text needs text")
+	}
+	write := map[string]interface{}{"text": text}
+	for _, k := range []string{"cap_height_mm", "fill"} {
+		v, ok := args[k]
+		if !ok {
+			continue
+		}
+		if n, isNum := v.(float64); !isNum || n < 0 {
+			return nil, fmt.Errorf("reception-queue: enqueue_text %s must be a number >= 0, got %v", k, v)
+		}
+		write[k] = v
+	}
+	job := &Job{
+		ID: newID(), Kind: kindText, Name: str(args, "name"), Visitor: visitorOf(args), Write: write,
+		State: stateQueued, CreatedAt: time.Now(),
+	}
+	return q.addCard(job)
+}
+
+// addCard queues a writer job and asks a drawing portrait to make way for it.
+func (q *receptionQueue) addCard(job *Job) (map[string]interface{}, error) {
 	out, err := q.add(job)
 	if err == nil {
 		q.nudge(q.preempt)
@@ -403,10 +442,10 @@ func (q *receptionQueue) cancelJob(ctx context.Context, id string) (map[string]i
 	}
 	job.State, job.FinishedAt = stateCanceled, time.Now()
 	err := q.saveLocked()
-	cancelTag := q.cancelTag
+	cancelCard := q.cancelCard
 	q.mu.Unlock()
-	if wasActive && job.Kind == kindNameTag && cancelTag != nil {
-		cancelTag()
+	if wasActive && isCard(job) && cancelCard != nil {
+		cancelCard()
 	}
 	if wasActive {
 		if _, cerr := q.drawer.DoCommand(ctx, map[string]interface{}{"cancel": map[string]interface{}{}}); cerr != nil {
@@ -446,6 +485,9 @@ func summary(j *Job) map[string]interface{} {
 	}
 	if j.Visitor != nil {
 		out["visitor"] = j.Visitor
+	}
+	if j.Kind == kindText {
+		out["text"] = str(j.Write, "text")
 	}
 	if j.Kind == kindPortrait {
 		out["polylines_total"] = j.Total
@@ -494,7 +536,7 @@ func (q *receptionQueue) status() map[string]interface{} {
 	return map[string]interface{}{"active": active, "waiting": waiting, "finished": finished}
 }
 
-// orderedLocked is the waiting jobs in the order they will run: name tags
+// orderedLocked is the waiting jobs in the order they will run: card jobs
 // first, then a paused portrait before any new one, each oldest first.
 func (q *receptionQueue) orderedLocked() []*Job {
 	var out []*Job
@@ -505,7 +547,7 @@ func (q *receptionQueue) orderedLocked() []*Job {
 	}
 	rank := func(j *Job) int {
 		switch {
-		case j.Kind == kindNameTag:
+		case isCard(j):
 			return 0
 		case j.State == statePaused:
 			return 1
@@ -535,9 +577,14 @@ func (q *receptionQueue) findLocked(id string) *Job {
 	return nil
 }
 
-func (q *receptionQueue) nameTagWaitingLocked() bool {
+// isCard reports whether the job goes to the writer rather than the drawer.
+func isCard(j *Job) bool {
+	return j.Kind == kindNameTag || j.Kind == kindText
+}
+
+func (q *receptionQueue) cardWaitingLocked() bool {
 	for _, j := range q.jobs {
-		if j.Kind == kindNameTag && j.State == stateQueued {
+		if isCard(j) && j.State == stateQueued {
 			return true
 		}
 	}
@@ -568,8 +615,8 @@ func (q *receptionQueue) run(ctx context.Context) {
 				continue
 			}
 		}
-		if next.Kind == kindNameTag {
-			q.runNameTag(ctx, next)
+		if isCard(next) {
+			q.runCard(ctx, next)
 		} else {
 			q.runPortrait(ctx, next)
 		}
@@ -598,24 +645,28 @@ func (q *receptionQueue) finish(job *Job, state string, err error) {
 	}
 }
 
-func (q *receptionQueue) runNameTag(ctx context.Context, job *Job) {
-	q.logger.Infof("reception-queue: writing name tag %s", job.ID)
-	tagCtx, cancel := context.WithCancel(ctx)
+func (q *receptionQueue) runCard(ctx context.Context, job *Job) {
+	cmd := map[string]interface{}{"write": job.Write}
+	if job.Kind == kindNameTag {
+		cmd = fillName(q.nameTagCommand, job.Name).(map[string]interface{})
+	}
+	q.logger.Infof("reception-queue: writing %s %s", job.Kind, job.ID)
+	cardCtx, cancel := context.WithCancel(ctx)
 	q.mu.Lock()
-	q.cancelTag = cancel
+	q.cancelCard = cancel
 	q.mu.Unlock()
 	defer func() {
 		q.mu.Lock()
-		q.cancelTag = nil
+		q.cancelCard = nil
 		q.mu.Unlock()
 		cancel()
 	}()
-	_, err := q.writer.DoCommand(tagCtx, fillName(q.nameTagCommand, job.Name).(map[string]interface{}))
+	_, err := q.writer.DoCommand(cardCtx, cmd)
 	switch {
-	case tagCtx.Err() != nil:
-		q.finish(job, stateFailed, errors.New(interruptedTag))
+	case cardCtx.Err() != nil:
+		q.finish(job, stateFailed, errors.New(interruptedCard))
 	case err != nil:
-		q.logger.Warnf("reception-queue: name tag %s failed: %v", job.ID, err)
+		q.logger.Warnf("reception-queue: %s %s failed: %v", job.Kind, job.ID, err)
 		q.finish(job, stateFailed, err)
 	default:
 		q.finish(job, stateDone, nil)
@@ -664,13 +715,13 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 				continue
 			}
 			q.mu.Lock()
-			waiting := q.nameTagWaitingLocked()
+			waiting := q.cardWaitingLocked()
 			q.mu.Unlock()
 			if !waiting {
 				continue
 			}
 			paused = make(chan struct{})
-			q.logger.Infof("reception-queue: pausing portrait %s for a name tag", job.ID)
+			q.logger.Infof("reception-queue: pausing portrait %s for a card", job.ID)
 			go func() {
 				defer close(paused)
 				if _, err := q.drawer.DoCommand(ctx, map[string]interface{}{"pause": map[string]interface{}{}}); err != nil {
@@ -744,12 +795,12 @@ func (q *receptionQueue) load() error {
 		if j.Total == 0 {
 			j.Total = len(j.Polylines)
 		}
-		// A portrait interrupted by a stop resumes; a name tag cannot, so it waits for a person.
+		// A portrait interrupted by a stop resumes; a card cannot, so it waits for a person.
 		if j.State == stateActive {
 			if j.Kind == kindPortrait {
 				j.State = statePaused
 			} else {
-				j.State, j.Error, j.FinishedAt = stateFailed, interruptedTag, time.Now()
+				j.State, j.Error, j.FinishedAt = stateFailed, interruptedCard, time.Now()
 			}
 		}
 	}

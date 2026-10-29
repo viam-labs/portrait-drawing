@@ -15,8 +15,8 @@ import (
 	"go.viam.com/test"
 )
 
-func validCorner() *poseConfig {
-	return &poseConfig{
+func validCorner() *PoseConfig {
+	return &PoseConfig{
 		Translation: r3.Vector{X: 400, Y: 0, Z: 200},
 		Orientation: &spatialmath.OrientationConfig{Type: spatialmath.OrientationVectorDegreesType, Value: map[string]any{"th": 180.0, "x": 0.0, "y": 0.0, "z": 1.0}},
 	}
@@ -39,7 +39,7 @@ func TestConfigValidate_missingPaperCorner(t *testing.T) {
 func TestConfigValidate_missingCornerOrientation(t *testing.T) {
 	cfg := &Config{
 		Arm:                "my-arm",
-		PaperTopLeftCorner: &poseConfig{Translation: r3.Vector{X: 1}},
+		PaperTopLeftCorner: &PoseConfig{Translation: r3.Vector{X: 1}},
 		PaperWidthMM:       100,
 		PaperHeightMM:      60,
 	}
@@ -81,7 +81,7 @@ func TestConfigValidate_homePoseMissingOrientation(t *testing.T) {
 		PaperTopLeftCorner: validCorner(),
 		PaperWidthMM:       100,
 		PaperHeightMM:      60,
-		HomePose:           &poseConfig{Translation: r3.Vector{X: 1}},
+		HomePose:           &PoseConfig{Translation: r3.Vector{X: 1}},
 	}
 	_, _, err := cfg.Validate("")
 	test.That(t, err, test.ShouldNotBeNil)
@@ -124,7 +124,7 @@ func TestParseDrawPayload_valid(t *testing.T) {
 			[]interface{}{[]interface{}{20.0, 20.0}},
 		},
 	}
-	got, _, err := parseDrawPayload(payload)
+	got, _, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(got), test.ShouldEqual, 2)
 	test.That(t, len(got[0]), test.ShouldEqual, 2)
@@ -134,14 +134,14 @@ func TestParseDrawPayload_valid(t *testing.T) {
 }
 
 func TestParseDrawPayload_missingPolylines(t *testing.T) {
-	_, _, err := parseDrawPayload(map[string]interface{}{})
+	_, _, _, err := parseDrawPayload(map[string]interface{}{})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
 }
 
 func TestParseDrawPayload_emptyPolylines(t *testing.T) {
 	payload := map[string]interface{}{"polylines": []interface{}{}}
-	_, _, err := parseDrawPayload(payload)
+	_, _, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
 }
@@ -153,7 +153,7 @@ func TestParseDrawPayload_emptyInnerPolyline(t *testing.T) {
 			[]interface{}{},
 		},
 	}
-	_, _, err := parseDrawPayload(payload)
+	_, _, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "empty")
 }
@@ -164,7 +164,7 @@ func TestParseDrawPayload_wrongPointArity(t *testing.T) {
 			[]interface{}{[]interface{}{0.0, 0.0, 5.0}},
 		},
 	}
-	_, _, err := parseDrawPayload(payload)
+	_, _, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "2 elements")
 }
@@ -175,7 +175,7 @@ func TestParseDrawPayload_nonNumeric(t *testing.T) {
 			[]interface{}{[]interface{}{"not a number", 0.0}},
 		},
 	}
-	_, _, err := parseDrawPayload(payload)
+	_, _, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
@@ -389,93 +389,17 @@ func TestDrawOrPreview_returnsBase64WhenNoPreviewCamera(t *testing.T) {
 	test.That(t, hasCamera, test.ShouldBeFalse)
 }
 
-func TestConfigValidate_capturePoseInDeps(t *testing.T) {
+func TestConfigValidate_rejectsRemovedCapturePose(t *testing.T) {
 	cfg := &Config{
 		Arm:                "my-arm",
 		PaperTopLeftCorner: validCorner(),
 		PaperWidthMM:       100,
 		PaperHeightMM:      60,
-		CapturePose:        "camera-framing",
-	}
-	deps, _, err := cfg.Validate("")
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, deps, test.ShouldResemble, []string{"my-arm", "camera-framing"})
-}
-
-func TestConfigValidate_capturePoseAndHomePoseConflict(t *testing.T) {
-	cfg := &Config{
-		Arm:                "my-arm",
-		PaperTopLeftCorner: validCorner(),
-		PaperWidthMM:       100,
-		PaperHeightMM:      60,
-		HomePose:           validCorner(),
-		CapturePose:        "camera-framing",
+		RemovedCapturePose: "camera-framing",
 	}
 	_, _, err := cfg.Validate("")
 	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "capture_pose")
 	test.That(t, err.Error(), test.ShouldContainSubstring, "home_pose")
-}
-
-func switchWithLabels(name string, labels []string, setPosition *uint32) *inject.Switch {
-	sw := inject.NewSwitch(name)
-	sw.GetNumberOfPositionsFunc = func(_ context.Context, _ map[string]interface{}) (uint32, []string, error) {
-		return uint32(len(labels)), labels, nil
-	}
-	sw.SetPositionFunc = func(_ context.Context, position uint32, _ map[string]interface{}) error {
-		*setPosition = position
-		return nil
-	}
-	return sw
-}
-
-func TestCapturePoseGoToPosition_findsLabel(t *testing.T) {
-	var got uint32
-	d := &drawer{
-		logger:      logging.NewTestLogger(t),
-		cfg:         &Config{CapturePose: "camera-framing"},
-		capturePose: switchWithLabels("camera-framing", []string{"idle", "update config", "go to"}, &got),
-	}
-	position, err := d.capturePoseGoToPosition(context.Background())
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, position, test.ShouldEqual, uint32(2))
-}
-
-func TestCapturePoseGoToPosition_labelIndexNotHardcoded(t *testing.T) {
-	var got uint32
-	d := &drawer{
-		logger:      logging.NewTestLogger(t),
-		cfg:         &Config{CapturePose: "camera-framing"},
-		capturePose: switchWithLabels("camera-framing", []string{"Go To", "idle"}, &got),
-	}
-	position, err := d.capturePoseGoToPosition(context.Background())
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, position, test.ShouldEqual, uint32(0))
-}
-
-func TestCapturePoseGoToPosition_missingLabel(t *testing.T) {
-	var got uint32
-	d := &drawer{
-		logger:      logging.NewTestLogger(t),
-		cfg:         &Config{CapturePose: "some-switch"},
-		capturePose: switchWithLabels("some-switch", []string{"off", "on"}, &got),
-	}
-	_, err := d.capturePoseGoToPosition(context.Background())
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "go to")
-	test.That(t, err.Error(), test.ShouldContainSubstring, "arm-position-saver")
-}
-
-func TestGoToRestPose_usesSwitch(t *testing.T) {
-	var got uint32
-	d := &drawer{
-		logger:      logging.NewTestLogger(t),
-		cfg:         &Config{CapturePose: "camera-framing"},
-		capturePose: switchWithLabels("camera-framing", []string{"idle", "update config", "go to"}, &got),
-	}
-	test.That(t, d.hasRestPose(), test.ShouldBeTrue)
-	test.That(t, d.goToRestPose(context.Background(), nil), test.ShouldBeNil)
-	test.That(t, got, test.ShouldEqual, uint32(2))
 }
 
 func TestGoToRestPose_noneConfigured(t *testing.T) {
@@ -483,7 +407,7 @@ func TestGoToRestPose_noneConfigured(t *testing.T) {
 	test.That(t, d.hasRestPose(), test.ShouldBeFalse)
 	err := d.goToRestPose(context.Background(), nil)
 	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "capture_pose")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "home_pose")
 }
 
 func TestDrawWaypoints_approachIsNotLinear(t *testing.T) {
@@ -793,12 +717,12 @@ func twoPolylinePayload(startAt int) map[string]interface{} {
 }
 
 func TestParseDrawPayload_startAt(t *testing.T) {
-	_, startAt, err := parseDrawPayload(twoPolylinePayload(1))
+	_, startAt, _, err := parseDrawPayload(twoPolylinePayload(1))
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, startAt, test.ShouldEqual, 1)
 
 	for _, bad := range []int{-1, 2} {
-		_, _, err := parseDrawPayload(twoPolylinePayload(bad))
+		_, _, _, err := parseDrawPayload(twoPolylinePayload(bad))
 		test.That(t, err, test.ShouldNotBeNil)
 		test.That(t, err.Error(), test.ShouldContainSubstring, "start_at")
 	}
@@ -844,7 +768,7 @@ func TestPause_waitsForTheDrawToStop(t *testing.T) {
 	}
 
 	// What executeDraw does when it sees the request at a polyline boundary.
-	d.hold([]Polyline{{{0, 0}}, {{1, 1}}, {{2, 2}}}, 2)
+	d.hold([]Polyline{{{0, 0}}, {{1, 1}}, {{2, 2}}}, 2, surface{})
 	d.setPhase(phasePaused)
 	release()
 
@@ -864,11 +788,44 @@ func TestResume_nothingHeld(t *testing.T) {
 
 func TestResume_refusedWhileAnotherDrawRuns(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
-	d.hold([]Polyline{{{0, 0}}}, 0)
+	d.hold([]Polyline{{{0, 0}}}, 0, surface{})
 	_, release, err := d.acquireDrawSlot(context.Background())
 	test.That(t, err, test.ShouldBeNil)
 	defer release()
 	_, err = d.resume(context.Background())
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "already running")
+}
+
+func TestParseDrawPayload_paperOverride(t *testing.T) {
+	payload := twoPolylinePayload(0)
+	payload["paper"] = map[string]interface{}{
+		"top_left_corner": map[string]interface{}{
+			"translation": map[string]interface{}{"x": 100.0, "y": 50.0, "z": 20.0},
+			"orientation": map[string]interface{}{"type": "ov_degrees", "value": map[string]interface{}{"x": 0.0, "y": 0.0, "z": -1.0, "th": 0.0}},
+		},
+		"top_right_corner": map[string]interface{}{"x": 100.0, "y": 135.9, "z": 20.0},
+		"width_mm":         85.9,
+		"height_mm":        59.2,
+	}
+	_, _, paper, err := parseDrawPayload(payload)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, paper, test.ShouldNotBeNil)
+	test.That(t, paper.WidthMM, test.ShouldEqual, 85.9)
+
+	s, err := paper.resolve("paper.")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s.corner.Point().X, test.ShouldEqual, 100.0)
+	test.That(t, s.across.Y, test.ShouldAlmostEqual, 1.0)
+
+	payload["paper"] = map[string]interface{}{"width_mm": 1.0, "height_mm": 1.0}
+	_, _, _, err = parseDrawPayload(payload)
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "paper.top_left_corner")
+}
+
+func TestParseDrawPayload_noPaperOverride(t *testing.T) {
+	_, _, paper, err := parseDrawPayload(twoPolylinePayload(0))
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, paper, test.ShouldBeNil)
 }
