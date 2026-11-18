@@ -55,6 +55,7 @@ DoCommand, no image data passing through your hands.
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
 | `allowed_collisions` | array | no | Frame pairs the planner should not treat as a collision. See [Anything bolted to the arm](#anything-bolted-to-the-arm). |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
+| `force_guard` | object | no | Stops a drawing when a sensor reads more force than a bare marker tip should produce. See [A cap left on the marker](#a-cap-left-on-the-marker). |
 
 ### Which corner is top-left
 
@@ -107,6 +108,42 @@ Use the frame names exactly as the planner prints them in that error. Note that 
 component's geometry hangs off its `_origin` frame, not its bare name.
 
 Allowances apply to every move the drawer plans, travel and drawing alike.
+
+### A cap left on the marker
+
+A capped marker is longer and blunter than a bare tip: it reaches the paper
+before the pen is all the way down, and it pushes back harder once it is there.
+`force_guard` watches a `sensor` component for both:
+
+```json
+"force_guard": {
+  "sensor": "force-1",
+  "reading": "Fz",
+  "max_force": 5,
+  "contact_force": 1,
+  "contact_margin_mm": 2
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `sensor` | string | **yes** | A sensor component whose readings include the force on the pen. |
+| `reading` | string | **yes** | The key in the sensor's readings to watch. Its magnitude is used, so the sign of the mounting does not matter. |
+| `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units. Set it a little above the most you see in a normal drawing. |
+| `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
+| `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
+
+The sensor is polled every 20 ms through every move of a drawing. Each descent
+is made in two moves, down to the margin and then onto the paper, so the limit
+changes at a known height. When a limit is passed the arm stops, lifts the pen
+straight up, and returns to the rest pose. `status` then reports the job as
+`failed` with `"fault": "excess_force"`, and it stays resumable: take the cap
+off and send `resume`, which redraws the stroke that tripped. A sensor that
+cannot be read fails the drawing the same way, without the `fault`, since an
+unreadable guard is not guarding anything.
+
+The readings are used as they come, so tare the sensor with the pen lifted if it
+does not read near zero there.
 
 ### The rest pose
 
@@ -266,7 +303,9 @@ so this is how you find out what is happening — or whether anything is.
 
 `state` moves through `idle` → `moving_to_home_pose` → `capturing` →
 `generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
-(with `last_error`). The counts appear once drawing starts.
+(with `last_error`, and `fault` when the cause is one a person can clear, such
+as `excess_force` from the [`force_guard`](#a-cap-left-on-the-marker)). The
+counts appear once drawing starts.
 
 Readable while a drawing is in flight: `executeDraw` holds the draw slot but not
 the mutex, so this does not queue behind it.

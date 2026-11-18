@@ -15,6 +15,7 @@ import (
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/motionplan/armplanning"
@@ -77,6 +78,7 @@ type Config struct {
 	// instead of coming back as base64.
 	PreviewCamera      string                                     `json:"preview_camera,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
+	ForceGuard         *ForceGuardConfig                          `json:"force_guard,omitempty"`
 }
 
 // AllowedCollision is a pair of frame names permitted to overlap. Use the names
@@ -210,6 +212,16 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		return nil, nil, errors.New("photo is set but stroke_generator is not; capture_and_draw needs both")
 	}
 	deps := []string{cfg.Arm}
+	if cfg.ForceGuard != nil {
+		liftOff := cfg.LiftOffZMM
+		if liftOff == 0 {
+			liftOff = defaultLiftOffZMM
+		}
+		if err := cfg.ForceGuard.validate(path, liftOff); err != nil {
+			return nil, nil, err
+		}
+		deps = append(deps, cfg.ForceGuard.Sensor)
+	}
 	if cfg.StrokeGenerator != "" {
 		deps = append(deps, cfg.StrokeGenerator)
 	}
@@ -238,8 +250,9 @@ type drawer struct {
 	photo           camera.Camera
 	previewCamera   camera.Camera
 	collisionSpecs  []motionplan.CollisionSpecification
+	forceGuard      *forceGuard
 
-	mu       sync.Mutex
+	mu      sync.Mutex
 	cancelFn context.CancelFunc
 	progress progress
 	// drawDone is closed when the running draw releases its slot, so pause can
@@ -277,6 +290,8 @@ type progress struct {
 	startedAt      time.Time
 	endedAt        time.Time
 	lastError      string
+	// fault names a failure a person can clear, so a client can say what to do.
+	fault string
 }
 
 func (d *drawer) setPhase(phase string) {
@@ -295,6 +310,7 @@ func (d *drawer) setFailed(err error) {
 	d.mu.Lock()
 	d.progress.phase = phaseFailed
 	d.progress.lastError = err.Error()
+	d.progress.fault = faultOf(err)
 	d.progress.endedAt = time.Now()
 	d.mu.Unlock()
 }
@@ -302,6 +318,7 @@ func (d *drawer) setFailed(err error) {
 func (d *drawer) startDrawing(polylines, points int) {
 	d.mu.Lock()
 	d.progress.phase = phaseDrawing
+	d.progress.fault = ""
 	d.progress.polylinesTotal = polylines
 	d.progress.pointsTotal = points
 	d.progress.polylinesDone = 0
@@ -347,6 +364,9 @@ func (d *drawer) status() map[string]interface{} {
 	}
 	if p.lastError != "" {
 		out["last_error"] = p.lastError
+	}
+	if p.fault != "" {
+		out["fault"] = p.fault
 	}
 	if d.held != nil {
 		out["resumable"] = true
@@ -409,7 +429,16 @@ func newDrawer(
 			return nil, fmt.Errorf("drawer: get preview_camera dep %q: %w", cfg.PreviewCamera, err)
 		}
 	}
+	var guard *forceGuard
+	if fg := cfg.ForceGuard; fg != nil {
+		s, sensorErr := sensor.FromProvider(deps, fg.Sensor)
+		if sensorErr != nil {
+			return nil, fmt.Errorf("drawer: get force_guard.sensor dep %q: %w", fg.Sensor, sensorErr)
+		}
+		guard = &forceGuard{sensor: s, reading: fg.Reading, max: fg.MaxForce, contact: fg.ContactForce}
+	}
 	return &drawer{
+		forceGuard:      guard,
 		paper:           paper,
 		name:            conf.ResourceName(),
 		logger:          logger,
@@ -971,8 +1000,10 @@ func collisionSpecs(pairs []AllowedCollision) []motionplan.CollisionSpecificatio
 // pen is on the paper (or dropping onto it), which must follow a straight line;
 // the rest are travel and are left to the planner.
 type waypoint struct {
-	x, y, z      float64
-	linear       bool
+	x, y, z float64
+	linear  bool
+	// clear marks a move that stays above zClear, where a bare tip touches nothing.
+	clear        bool
 	endsPolyline bool
 	label        string
 }
@@ -990,15 +1021,19 @@ func paperToWorld(corner, across r3.Vector, p [2]float64) (float64, float64) {
 	return corner.X + p[0]*across.X + p[1]*down.X, corner.Y + p[0]*across.Y + p[1]*down.Y
 }
 
-func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zUp, zDown float64) []waypoint {
+// drawWaypoints splits each descent at zClear when it lies above zDown, so the
+// part of it a bare tip makes without touching the paper is a move of its own.
+func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zUp, zDown, zClear float64) []waypoint {
+	checkContact := zClear > zDown
 	var out []waypoint
 	for k, poly := range polylines[first:] {
 		i := first + k
 		sx, sy := paperToWorld(corner, across, poly[0])
-		out = append(out,
-			waypoint{x: sx, y: sy, z: zUp, label: fmt.Sprintf("polyline %d approach", i)},
-			waypoint{x: sx, y: sy, z: zDown, linear: true, label: fmt.Sprintf("polyline %d pen-down", i)},
-		)
+		out = append(out, waypoint{x: sx, y: sy, z: zUp, clear: checkContact, label: fmt.Sprintf("polyline %d approach", i)})
+		if checkContact {
+			out = append(out, waypoint{x: sx, y: sy, z: zClear, linear: true, clear: true, label: fmt.Sprintf("polyline %d descent", i)})
+		}
+		out = append(out, waypoint{x: sx, y: sy, z: zDown, linear: true, label: fmt.Sprintf("polyline %d pen-down", i)})
 		for j := 1; j < len(poly); j++ {
 			px, py := paperToWorld(corner, across, poly[j])
 			out = append(out, waypoint{x: px, y: py, z: zDown, linear: true, label: fmt.Sprintf("polyline %d point %d", i, j)})
@@ -1022,6 +1057,10 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	orientation := paper.corner.Orientation()
 	zDown := corner.Z
 	zUp := corner.Z + d.cfg.LiftOffZMM
+	zClear := zDown
+	if d.cfg.ForceGuard != nil {
+		zClear = zDown + d.cfg.ForceGuard.contactMarginMM()
+	}
 
 	total := 0
 	for _, poly := range polylines {
@@ -1038,13 +1077,22 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	startedAt := time.Now()
 	drawn, nextProgress := startAt, progressStepPercent
 
-	for _, wp := range drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown) {
+	for _, wp := range drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear) {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
 		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
-		if err := d.planAndExecute(ctx, fs, target, d.constraints(wp.linear)); err != nil {
+		if err := d.guardedMove(ctx, fs, target, wp.linear, wp.clear); err != nil {
 			wrapped := fmt.Errorf("drawer: %s: %w", wp.label, err)
+			if ctx.Err() != nil {
+				d.setPhase(phaseCanceled)
+				return nil, wrapped
+			}
+			if faultOf(err) == faultExcessForce {
+				if retreatErr := d.retreat(ctx, fs, zUp, orientation); retreatErr != nil {
+					d.logger.Warnf("drawer: retreat after excess force: %v", retreatErr)
+				}
+			}
 			if ctx.Err() != nil {
 				d.setPhase(phaseCanceled)
 			} else {
