@@ -113,12 +113,13 @@ Allowances apply to every move the drawer plans, travel and drawing alike.
 
 A capped marker is longer and blunter than a bare tip: it reaches the paper
 before the pen is all the way down, and it pushes back harder once it is there.
-`force_guard` watches a `sensor` component for both:
+`force_guard` watches a `sensor` component for both. This example is for a
+`viam:ufactory:ft_sensor`, whose readings are in newtons:
 
 ```json
 "force_guard": {
-  "sensor": "force-1",
-  "reading": "Fz",
+  "sensor": "ft-sensor",
+  "reading": "Fz_N",
   "max_force": 5,
   "contact_force": 1,
   "contact_margin_mm": 2
@@ -128,10 +129,19 @@ before the pen is all the way down, and it pushes back harder once it is there.
 | Attribute | Type | Required | Description |
 |---|---|---|---|
 | `sensor` | string | **yes** | A sensor component whose readings include the force on the pen. |
-| `reading` | string | **yes** | The key in the sensor's readings to watch. Its magnitude is used, so the sign of the mounting does not matter. |
-| `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units. Set it a little above the most you see in a normal drawing. |
+| `reading` | string | **yes** | The key in the sensor's readings to watch: the axis the pen pushes along, `Fz_N` for a pen in line with the wrist. |
+| `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units, measured from the baseline below. Set it a little above the most you see in a normal drawing. |
 | `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
 | `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
+
+A wrist sensor reads the weight of the pen holder and its own bias even with
+nothing touching — tens of newtons is normal. So every draw and every `resume`
+first holds the pen 40 mm above the first stroke, averages the reading there,
+and measures both limits from that baseline, in either direction. The sensor's
+own zero is left alone. If those samples are all identical the draw fails
+before it starts: a live sensor always has noise, and a `ft_sensor` whose
+controller stream is off reads exactly zero on every axis, which would
+otherwise look like a pen that never touches anything.
 
 The sensor is polled every 20 ms through every move of a drawing. Each descent
 is made in two moves, down to the margin and then onto the paper, so the limit
@@ -141,9 +151,6 @@ straight up, and returns to the rest pose. `status` then reports the job as
 off and send `resume`, which redraws the stroke that tripped. A sensor that
 cannot be read fails the drawing the same way, without the `fault`, since an
 unreadable guard is not guarding anything.
-
-The readings are used as they come, so tare the sensor with the pen lifted if it
-does not read near zero there.
 
 ### The rest pose
 

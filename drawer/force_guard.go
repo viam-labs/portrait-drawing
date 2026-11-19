@@ -16,6 +16,10 @@ import (
 const (
 	defaultContactMarginMM = 2.0
 	forcePollInterval      = 20 * time.Millisecond
+	baselineSamples        = 10
+	// baselineHeightMM is above the paper by more than a marker cap adds, so a
+	// capped pen is still in the air when the baseline is taken.
+	baselineHeightMM = 40.0
 	faultExcessForce       = "excess_force"
 )
 
@@ -78,8 +82,36 @@ func (g *forceGuard) limit(clear bool) float64 {
 	return g.max
 }
 
-// read returns the magnitude of the force: which sign means "pushing on the
-// paper" depends on how the sensor is mounted.
+// measureBaseline averages the reading with the pen held still in the air. A
+// wrist sensor carries the tool's weight and its own bias, and the pen keeps one
+// attitude for the whole drawing, so that offset is constant.
+func (g *forceGuard) measureBaseline(ctx context.Context) (float64, error) {
+	var sum float64
+	lowest, highest := math.Inf(1), math.Inf(-1)
+	for i := 0; i < baselineSamples; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-time.After(forcePollInterval):
+			}
+		}
+		v, err := g.read(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("force_guard: read %q: %w", g.reading, err)
+		}
+		sum += v
+		lowest, highest = math.Min(lowest, v), math.Max(highest, v)
+	}
+	// A live sensor always has noise; identical samples mean nothing is being measured.
+	if lowest == highest {
+		return 0, fmt.Errorf(
+			"force_guard: %q read exactly %g %d times in a row, so the sensor is not streaming; refusing to draw unguarded",
+			g.reading, lowest, baselineSamples)
+	}
+	return sum / baselineSamples, nil
+}
+
 func (g *forceGuard) read(ctx context.Context) (float64, error) {
 	readings, err := g.sensor.Readings(ctx, nil)
 	if err != nil {
@@ -91,15 +123,15 @@ func (g *forceGuard) read(ctx context.Context) (float64, error) {
 	}
 	switch v := raw.(type) {
 	case float64:
-		return math.Abs(v), nil
+		return v, nil
 	case float32:
-		return math.Abs(float64(v)), nil
+		return float64(v), nil
 	case int:
-		return math.Abs(float64(v)), nil
+		return float64(v), nil
 	case int32:
-		return math.Abs(float64(v)), nil
+		return float64(v), nil
 	case int64:
-		return math.Abs(float64(v)), nil
+		return float64(v), nil
 	default:
 		return 0, fmt.Errorf("reading %q is %T, not a number", g.reading, raw)
 	}
@@ -115,22 +147,23 @@ func (e *excessForceError) Error() string {
 	if e.clear {
 		where = "before the pen should have reached the paper"
 	}
-	return fmt.Sprintf("force %.3g exceeded %.3g %s; take the cap off the marker, then resume", e.force, e.limit, where)
+	return fmt.Sprintf("force %.3g over its baseline exceeded %.3g %s; take the cap off the marker, then resume",
+		e.force, e.limit, where)
 }
 
 // guardedMove is planAndExecute with the force watched for the whole move. clear
 // marks a move that stays above the paper, held to the lower contact limit.
 func (d *drawer) guardedMove(
-	ctx context.Context, fs *referenceframe.FrameSystem, target spatialmath.Pose, linear, clear bool,
+	ctx context.Context, fs *referenceframe.FrameSystem, target spatialmath.Pose, baseline float64, linear, clear bool,
 ) error {
-	return d.watchForce(ctx, clear, func(moveCtx context.Context) error {
+	return d.watchForce(ctx, baseline, clear, func(moveCtx context.Context) error {
 		return d.planAndExecute(moveCtx, fs, target, d.constraints(linear))
 	})
 }
 
-// watchForce runs move, canceling it and stopping the arm if the force passes
-// the limit or cannot be read.
-func (d *drawer) watchForce(ctx context.Context, clear bool, move func(context.Context) error) error {
+// watchForce runs move, canceling it and stopping the arm if the force strays
+// from baseline by more than the limit, either way, or cannot be read.
+func (d *drawer) watchForce(ctx context.Context, baseline float64, clear bool, move func(context.Context) error) error {
 	if d.forceGuard == nil {
 		return move(ctx)
 	}
@@ -144,10 +177,11 @@ func (d *drawer) watchForce(ctx context.Context, clear bool, move func(context.C
 		ticker := time.NewTicker(forcePollInterval)
 		defer ticker.Stop()
 		for {
-			force, err := d.forceGuard.read(moveCtx)
+			raw, err := d.forceGuard.read(moveCtx)
 			if moveCtx.Err() != nil {
 				return
 			}
+			force := math.Abs(raw - baseline)
 			switch {
 			case err != nil:
 				// A guard that cannot read is no guard, so the move does not go on without it.
@@ -178,6 +212,18 @@ func (d *drawer) watchForce(ctx context.Context, clear bool, move func(context.C
 	default:
 		return err
 	}
+}
+
+// forceBaseline holds the pen well above where the drawing starts and measures
+// the force there. Without a guard it does nothing.
+func (d *drawer) forceBaseline(ctx context.Context, fs *referenceframe.FrameSystem, above spatialmath.Pose) (float64, error) {
+	if d.forceGuard == nil {
+		return 0, nil
+	}
+	if err := d.planAndExecute(ctx, fs, above, d.constraints(false)); err != nil {
+		return 0, fmt.Errorf("move to force baseline height: %w", err)
+	}
+	return d.forceGuard.measureBaseline(ctx)
 }
 
 // retreat lifts the pen straight up from wherever the guard stopped it and

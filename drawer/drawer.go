@@ -1077,12 +1077,28 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	startedAt := time.Now()
 	drawn, nextProgress := startAt, progressStepPercent
 
-	for _, wp := range drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear) {
+	waypoints := drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear)
+	var baseline float64
+	if len(waypoints) > 0 {
+		above := spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
+		baseline, err = d.forceBaseline(ctx, fs, above)
+		if err != nil {
+			wrapped := fmt.Errorf("drawer: %w", err)
+			if ctx.Err() != nil {
+				d.setPhase(phaseCanceled)
+			} else {
+				d.setFailed(wrapped)
+			}
+			return nil, wrapped
+		}
+	}
+
+	for _, wp := range waypoints {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
 		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
-		if err := d.guardedMove(ctx, fs, target, wp.linear, wp.clear); err != nil {
+		if err := d.guardedMove(ctx, fs, target, baseline, wp.linear, wp.clear); err != nil {
 			wrapped := fmt.Errorf("drawer: %s: %w", wp.label, err)
 			if ctx.Err() != nil {
 				d.setPhase(phaseCanceled)

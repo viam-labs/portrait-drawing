@@ -107,14 +107,14 @@ func untilCanceled(ctx context.Context) error {
 
 func TestWatchForce_normalForceLetsTheMoveFinish(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return 3.0, nil })
-	err := d.watchForce(context.Background(), false, func(context.Context) error { return nil })
+	err := d.watchForce(context.Background(), 0,false, func(context.Context) error { return nil })
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 }
 
 func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
-	err := d.watchForce(context.Background(), false, untilCanceled)
+	err := d.watchForce(context.Background(), 0,false, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "cap")
 	test.That(t, stops.Load(), test.ShouldEqual, 1)
@@ -122,14 +122,53 @@ func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 
 func TestWatchForce_clearMoveUsesTheContactLimit(t *testing.T) {
 	d, _ := guardedDrawer(t, func() (interface{}, error) { return 3.0, nil })
-	err := d.watchForce(context.Background(), true, untilCanceled)
+	err := d.watchForce(context.Background(), 0,true, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "before the pen")
 }
 
+func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
+	// A wrist sensor carrying the tool reads far from zero with nothing touching.
+	d, stops := guardedDrawer(t, func() (interface{}, error) { return -18.4, nil })
+	err := d.watchForce(context.Background(), -18.0, true, func(context.Context) error { return nil })
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, stops.Load(), test.ShouldEqual, 0)
+
+	err = d.watchForce(context.Background(), -12.0, false, untilCanceled)
+	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
+}
+
+func TestMeasureBaseline_averagesTheSamples(t *testing.T) {
+	var n atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) {
+		if n.Add(1)%2 == 0 {
+			return -18.2, nil
+		}
+		return -17.8, nil
+	})
+	baseline, err := d.forceGuard.measureBaseline(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, baseline, test.ShouldAlmostEqual, -18.0, 1e-9)
+	test.That(t, n.Load(), test.ShouldEqual, baselineSamples)
+}
+
+func TestMeasureBaseline_refusesAFrozenSensor(t *testing.T) {
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
+	_, err := d.forceGuard.measureBaseline(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "not streaming")
+}
+
+func TestMeasureBaseline_propagatesReadErrors(t *testing.T) {
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return nil, errors.New("unplugged") })
+	_, err := d.forceGuard.measureBaseline(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "unplugged")
+}
+
 func TestWatchForce_unreadableSensorStopsTheMove(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return nil, errors.New("unplugged") })
-	err := d.watchForce(context.Background(), false, untilCanceled)
+	err := d.watchForce(context.Background(), 0,false, untilCanceled)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "unplugged")
 	test.That(t, faultOf(err), test.ShouldEqual, "")
@@ -138,7 +177,7 @@ func TestWatchForce_unreadableSensorStopsTheMove(t *testing.T) {
 
 func TestWatchForce_nonNumericReadingStopsTheMove(t *testing.T) {
 	d, _ := guardedDrawer(t, func() (interface{}, error) { return "high", nil })
-	err := d.watchForce(context.Background(), false, untilCanceled)
+	err := d.watchForce(context.Background(), 0,false, untilCanceled)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "not a number")
 }
@@ -146,7 +185,7 @@ func TestWatchForce_nonNumericReadingStopsTheMove(t *testing.T) {
 func TestWatchForce_withoutAGuardJustMoves(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
 	moved := false
-	err := d.watchForce(context.Background(), true, func(context.Context) error {
+	err := d.watchForce(context.Background(), 0,true, func(context.Context) error {
 		moved = true
 		return nil
 	})
