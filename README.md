@@ -133,6 +133,7 @@ before the pen is all the way down, and it pushes back harder once it is there.
 | `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units, measured from the baseline below. Set it a little above the most you see in a normal drawing. |
 | `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
 | `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
+| `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off. Without it the arm goes to `home_pose`. |
 
 A wrist sensor reads the weight of the pen holder and its own bias even with
 nothing touching — tens of newtons is normal. So every draw and every `resume`
@@ -143,10 +144,16 @@ before it starts: a live sensor always has noise, and a `ft_sensor` whose
 controller stream is off reads exactly zero on every axis, which would
 otherwise look like a pen that never touches anything.
 
+A sensor can also stop updating partway through a drawing, when it loses its
+stream or latches an overload, and go on returning its last reading as if it
+were live. So a reading that stays exactly the same for 25 polls in a row, about
+half a second, stops the drawing the same way, without the `fault`: power-cycle
+the arm's controller if the sensor latched an overload.
+
 The sensor is polled every 20 ms through every move of a drawing. Each descent
 is made in two moves, down to the margin and then onto the paper, so the limit
 changes at a known height. When a limit is passed the arm stops, lifts the pen
-straight up, and returns to the rest pose. `status` then reports the job as
+straight up, and goes to `retreat_pose`, or else the rest pose. `status` then reports the job as
 `failed` with `"fault": "excess_force"`, and it stays resumable: take the cap
 off and send `resume`, which redraws the stroke that tripped. A sensor that
 cannot be read fails the drawing the same way, without the `fault`, since an

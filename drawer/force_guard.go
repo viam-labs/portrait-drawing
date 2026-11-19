@@ -21,6 +21,12 @@ const (
 	// capped pen is still in the air when the baseline is taken.
 	baselineHeightMM = 40.0
 	faultExcessForce = "excess_force"
+	// frozenPolls is how many polls in a row may read exactly the same before the
+	// sensor counts as frozen: about half a second, far longer than a live
+	// sensor's noise ever holds still.
+	frozenPolls = 25
+	// retreatPosition is an arm-position-saver switch's "go to" position.
+	retreatPosition = 2
 )
 
 // ForceGuardConfig stops a drawing when the pen meets more resistance than a
@@ -35,6 +41,9 @@ type ForceGuardConfig struct {
 	// above the paper, where a bare tip touches nothing.
 	ContactForce    float64 `json:"contact_force"`
 	ContactMarginMM float64 `json:"contact_margin_mm,omitempty"`
+	// RetreatPose is an arm-position-saver switch the arm goes to after the guard
+	// stops a drawing, somewhere a person can reach the pen. Unset uses home_pose.
+	RetreatPose string `json:"retreat_pose,omitempty"`
 }
 
 func (c *ForceGuardConfig) contactMarginMM() float64 {
@@ -68,11 +77,16 @@ func (c *ForceGuardConfig) validate(path string, liftOffZMM float64) error {
 	return nil
 }
 
+type positioner interface {
+	SetPosition(ctx context.Context, position uint32, extra map[string]interface{}) error
+}
+
 type forceGuard struct {
 	sensor  sensor.Sensor
 	reading string
 	max     float64
 	contact float64
+	retreat positioner
 }
 
 func (g *forceGuard) limit(clear bool) float64 {
@@ -164,6 +178,19 @@ func (s *forceStats) summary() map[string]interface{} {
 type forceRun struct {
 	baseline        float64
 	lifted, penDown forceStats
+	// last and repeats track identical raw readings across moves, since a
+	// frozen sensor stays frozen from one move to the next.
+	last    float64
+	repeats int
+}
+
+func (r *forceRun) noteRaw(raw float64) {
+	if r.repeats > 0 && raw == r.last {
+		r.repeats++
+	} else {
+		r.repeats = 1
+	}
+	r.last = raw
 }
 
 func (r *forceRun) record(clear bool, force float64) {
@@ -201,6 +228,18 @@ func (d *drawer) finishForceRun(run *forceRun) {
 type excessForceError struct {
 	force, limit float64
 	clear        bool
+}
+
+// frozenForceError is a sensor that has stopped updating mid-drawing: lost its
+// stream, or latched an overload. It reads plausible numbers that mean nothing.
+type frozenForceError struct {
+	reading string
+	value   float64
+}
+
+func (e *frozenForceError) Error() string {
+	return fmt.Sprintf("force_guard: %q read exactly %g for %d polls in a row, so the sensor has stopped updating; "+
+		"power-cycle the arm's controller if it latched an overload", e.reading, e.value, frozenPolls)
 }
 
 func (e *excessForceError) Error() string {
@@ -245,11 +284,14 @@ func (d *drawer) watchForce(ctx context.Context, run *forceRun, clear bool, move
 			force := math.Abs(raw - run.baseline)
 			if err == nil {
 				run.record(clear, force)
+				run.noteRaw(raw)
 			}
 			switch {
 			case err != nil:
 				// A guard that cannot read is no guard, so the move does not go on without it.
 				tripped <- fmt.Errorf("force_guard: read %q: %w", d.forceGuard.reading, err)
+			case run.repeats >= frozenPolls:
+				tripped <- &frozenForceError{reading: d.forceGuard.reading, value: raw}
 			case force > limit:
 				tripped <- &excessForceError{force: force, limit: limit, clear: clear}
 			default:
@@ -315,10 +357,29 @@ func (d *drawer) retreat(ctx context.Context, fs *referenceframe.FrameSystem, zU
 			return fmt.Errorf("lift the pen: %w", err)
 		}
 	}
+	return d.park(ctx, fs)
+}
+
+// park takes the arm to retreat_pose, or else to the rest pose.
+func (d *drawer) park(ctx context.Context, fs *referenceframe.FrameSystem) error {
+	if d.forceGuard != nil && d.forceGuard.retreat != nil {
+		if err := d.forceGuard.retreat.SetPosition(ctx, retreatPosition, nil); err != nil {
+			return fmt.Errorf("go to retreat_pose %q: %w", d.cfg.ForceGuard.RetreatPose, err)
+		}
+		return nil
+	}
 	if !d.hasRestPose() {
 		return nil
 	}
 	return d.goToRestPose(ctx, fs)
+}
+
+// guardStopped reports whether the guard, not the planner or the arm, ended the
+// move: then the pen may be pressing on the paper and has to come off it.
+func guardStopped(err error) bool {
+	var excess *excessForceError
+	var frozen *frozenForceError
+	return errors.As(err, &excess) || errors.As(err, &frozen)
 }
 
 func faultOf(err error) string {

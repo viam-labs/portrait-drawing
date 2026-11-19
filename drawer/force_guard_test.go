@@ -253,3 +253,60 @@ func TestStatus_excessForceIsAFaultUntilDrawingRestarts(t *testing.T) {
 	_, hasFault := d.status()["fault"]
 	test.That(t, hasFault, test.ShouldBeFalse)
 }
+
+func TestWatchForce_aFrozenSensorStopsTheMove(t *testing.T) {
+	// Plausible, in range, and exactly the same every time: a stream that stopped.
+	d, stops := guardedDrawer(t, func() (interface{}, error) { return 0.3, nil })
+	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
+	var frozen *frozenForceError
+	test.That(t, errors.As(err, &frozen), test.ShouldBeTrue)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "stopped updating")
+	test.That(t, stops.Load(), test.ShouldEqual, 1)
+	test.That(t, guardStopped(err), test.ShouldBeTrue)
+	test.That(t, faultOf(err), test.ShouldEqual, "")
+}
+
+func TestWatchForce_aLiveSensorIsNotFrozen(t *testing.T) {
+	var n atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.3 + 0.001*float64(n.Add(1)%3), nil })
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(2*frozenPolls)*forcePollInterval)
+	defer cancel()
+	err := d.watchForce(ctx, &forceRun{}, false, untilCanceled)
+	test.That(t, errors.Is(err, context.DeadlineExceeded), test.ShouldBeTrue)
+}
+
+func TestForceRun_countsRepeatsAcrossMoves(t *testing.T) {
+	run := &forceRun{}
+	for i := 0; i < frozenPolls-1; i++ {
+		run.noteRaw(-12.5)
+	}
+	test.That(t, run.repeats, test.ShouldEqual, frozenPolls-1)
+	run.noteRaw(-12.5)
+	test.That(t, run.repeats, test.ShouldEqual, frozenPolls)
+	run.noteRaw(-12.4)
+	test.That(t, run.repeats, test.ShouldEqual, 1)
+}
+
+func TestConfigValidate_retreatPoseInDeps(t *testing.T) {
+	guard := validGuard()
+	guard.RetreatPose = "mat-view"
+	deps, _, err := guardedConfig(guard).Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldResemble, []string{"my-arm", "force-1", "mat-view"})
+}
+
+type fakePositioner struct{ positions []uint32 }
+
+func (f *fakePositioner) SetPosition(_ context.Context, p uint32, _ map[string]interface{}) error {
+	f.positions = append(f.positions, p)
+	return nil
+}
+
+func TestPark_goesToTheRetreatPose(t *testing.T) {
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
+	pos := &fakePositioner{}
+	d.forceGuard.retreat = pos
+	d.cfg = &Config{ForceGuard: &ForceGuardConfig{RetreatPose: "mat-view"}}
+	test.That(t, d.park(context.Background(), nil), test.ShouldBeNil)
+	test.That(t, pos.positions, test.ShouldResemble, []uint32{retreatPosition})
+}

@@ -16,6 +16,7 @@ import (
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/components/sensor"
+	toggleswitch "go.viam.com/rdk/components/switch"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/motionplan/armplanning"
@@ -221,6 +222,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 			return nil, nil, err
 		}
 		deps = append(deps, cfg.ForceGuard.Sensor)
+		if cfg.ForceGuard.RetreatPose != "" {
+			deps = append(deps, cfg.ForceGuard.RetreatPose)
+		}
 	}
 	if cfg.StrokeGenerator != "" {
 		deps = append(deps, cfg.StrokeGenerator)
@@ -442,6 +446,11 @@ func newDrawer(
 			return nil, fmt.Errorf("drawer: get force_guard.sensor dep %q: %w", fg.Sensor, sensorErr)
 		}
 		guard = &forceGuard{sensor: s, reading: fg.Reading, max: fg.MaxForce, contact: fg.ContactForce}
+		if fg.RetreatPose != "" {
+			if guard.retreat, err = toggleswitch.FromProvider(deps, fg.RetreatPose); err != nil {
+				return nil, fmt.Errorf("drawer: get force_guard.retreat_pose dep %q: %w", fg.RetreatPose, err)
+			}
+		}
 	}
 	return &drawer{
 		forceGuard:      guard,
@@ -1111,9 +1120,9 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 				d.setPhase(phaseCanceled)
 				return nil, wrapped
 			}
-			if faultOf(err) == faultExcessForce {
+			if guardStopped(err) {
 				if retreatErr := d.retreat(ctx, fs, zUp, orientation); retreatErr != nil {
-					d.logger.Warnf("drawer: retreat after excess force: %v", retreatErr)
+					d.logger.Warnf("drawer: retreat after the force guard stopped: %v", retreatErr)
 				}
 			}
 			if ctx.Err() != nil {
