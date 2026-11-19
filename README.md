@@ -12,7 +12,8 @@ Two services work together:
 
 Two more build on them: **`text-writer`** writes a line of text, such as a name
 tag, through a drawer, and **`reception-queue`** runs name tags and portraits on
-one arm in the right order.
+one arm in the right order. **`paper-finder`** looks at the drawing mat with a
+camera and says where the blank cards and name tags are.
 
 The drawer can drive the whole loop itself: pose the arm so its camera frames
 the subject, take the photo, generate the strokes, and draw the result — one
@@ -586,6 +587,105 @@ just do one job when asked.
 
 `visitor` is stored with the job and returned in summaries, for whatever tells the
 visitor their portrait is ready.
+
+## `viam:portrait-drawing:paper-finder`
+
+Finds portrait cards and name tags lying on the drawing mat, from a camera
+photo taken at one survey pose, and returns each as a `paper` the drawer's
+`draw` verb takes. Cards are told from tags by colour: a card is white all
+over, a tag is a coloured label inside a white border, whatever the colour.
+A tag reads the way its Viam logo does, wherever the logo sits on the label.
+
+Pixels become arm positions through a homography fitted by `calibrate`: the
+drawer draws a small cross at each of `calibration_points` on paper laid over
+the mat, and the finder photographs them from the survey pose and matches each
+cross to the point that drew it. The fit is saved in the module's data
+directory, so it survives restarts; run it again when the mat, the camera or
+the survey pose moves. A new pen holder that keeps the pen on the same axis
+only needs `pen_down_z` updating; one that moves the tip sideways needs a new
+calibration too, which then takes the offset into account.
+
+### Configuration
+
+```json
+{
+  "camera": "cam",
+  "source_name": "color",
+  "survey_pose": "mat-view",
+  "drawer": "drawer",
+  "tool_orientation": { "type": "ov_degrees", "value": { "x": 0.039, "y": -0.030, "z": -0.999, "th": -39.1 } },
+  "pen_down_z": 290,
+  "calibration_points": [
+    { "x": 150, "y": -200 }, { "x": 150, "y": 0 }, { "x": 150, "y": 200 },
+    { "x": 330, "y": -200 }, { "x": 330, "y": 200 }, { "x": 240, "y": -60 }
+  ]
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `camera` | string | **yes** | The camera that photographs the mat. |
+| `source_name` | string | no | Which of the camera's images to use when it returns several, such as a RealSense's `color`. |
+| `survey_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to before every photo, so the camera sees the mat from where it was calibrated. |
+| `drawer` | string | for `calibrate` | The drawer that draws the calibration crosses. |
+| `tool_orientation` | orientation | **yes** | The pen-down orientation every returned paper carries. |
+| `pen_down_z` | number | **yes** | The arm's Z with the pen tip on the mat. |
+| `calibration_points` | array | for `calibrate` | At least 5 arm X/Y positions spread across the camera's view, on paper. An uneven layout is fine: the crosses are matched to points by position, not by order. |
+| `cross_mm` | number | no | Calibration cross size. Default 10. |
+| `near` | position | no | What "nearest" means when sorting sheets. Default the arm's base. |
+| `card_width_mm`, `card_height_mm` | number | no | Default 101.6 x 152.4 (4 x 6 in). |
+| `name_tag_width_mm`, `name_tag_height_mm` | number | no | The label's writing area, inside its white backing. Default 82 x 53. |
+| `max_size_error_mm` | number | no | How far a sheet's measured size may be from its kind's before it is rejected as something else. Default 10. |
+
+### `find`
+
+```json
+{"find": {"kind": "name_tag"}}
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `kind` | string | `card` or `name_tag`; omit for both. |
+| `include_used` | bool | Also return sheets that already have ink on them. |
+| `near` | position | Overrides the configured `near` for this call. |
+
+Returns `sheets`, nearest first, each with `kind`, `used`, `center`,
+`distance_mm`, `measured_mm`, and a `paper` ready for the drawer's `draw`:
+
+```json
+{"draw": {"polylines": [...], "paper": <sheet.paper>}}
+```
+
+A card counts as used once it has two or more ink strokes 8 mm or longer, so a
+stray dot does not waste it. A tag counts as used once it has ink taller than
+its printed labels, which is handwriting. A card's top is the short edge nearer
+the top of the photo; either way up is fine for a portrait. A tag's paper is
+its label, inset from the white backing the camera outlines, and runs the way
+the label reads.
+
+Sheets that are found but not usable come back in `rejected` with a reason: a
+size that matches neither kind, or corners that a mirrored calibration would
+turn into backwards writing. An empty `sheets` is the cue to ask for paper.
+
+### `calibrate`
+
+```json
+{"calibrate": {}}
+```
+
+Draws the crosses, photographs them and fits the homography. Returns
+`crosses_found`, `matched`, `unmatched` points, and the fit's `rms_mm` and
+`max_mm`; it refuses a fit from fewer than 5 matched crosses. With
+`{"redraw": false}` it refits from crosses already on the mat.
+
+`status` reports whether the finder is calibrated, with the fit's residuals and
+when it was made.
+
+`python/find_paper.py` does the image work and runs on its own:
+
+```bash
+.venv/bin/python python/find_paper.py sheets < photo.jpg
+```
 
 ## Credits
 

@@ -28,6 +28,12 @@
       "model": "viam:portrait-drawing:reception-queue",
       "short_description": "Runs a reception desk's name tags and portraits on one arm, name tags first.",
       "markdown_link": "README.md"
+    },
+    {
+      "api": "rdk:service:generic",
+      "model": "viam:portrait-drawing:paper-finder",
+      "short_description": "Finds portrait cards and name tags on the drawing mat with a camera.",
+      "markdown_link": "README.md"
     }
   ],
   "applications": [
