@@ -10,7 +10,7 @@ const (
 	defaultGainMMPerUnit = 0.04
 	defaultMaxStepMM     = 0.05
 	defaultSearchStepMM  = 0.1
-	defaultMaxOffsetMM   = 1.0
+	defaultMaxOffsetMM   = 0.6
 	// touchFraction of the target is the least force that counts as touching.
 	touchFraction = 0.3
 	// onTargetFraction is how close to the target a point must be to teach the
@@ -19,9 +19,12 @@ const (
 	maxSurfacePoints = 400
 	minFitPoints     = 8
 	refitEvery       = 10
-	// surfaceResetMM is how far the configured paper height may move before the
-	// learned surface is taken to belong to some other setup.
-	surfaceResetMM = 2.0
+	// minTiltSpreadMM is how far apart, both ways, points must be before they fix
+	// a tilt: over a small patch, noise reads as a steep slope.
+	minTiltSpreadMM = 30.0
+	// maxTilt is the steepest the fitted paper may be, about twice the 0.27 mm
+	// per 100 mm a probe map of a card on armfarm07 measured.
+	maxTilt = 0.006
 	// forceTailSamples is how many of a move's last readings stand for the force
 	// it ended at: the mean over the whole move would include the time in the air.
 	forceTailSamples = 3
@@ -30,8 +33,8 @@ const (
 // ForceControlConfig draws with the pen held at a target force instead of at a
 // fixed height. Every pen-down point is set from a surface the drawer learns
 // from where the force was on target, corrected by the force the move before it
-// ended at, so it costs no extra moves. It needs force_guard, whose sensor and
-// baseline it uses and whose limits still apply.
+// ended at, so it costs no extra moves. It needs force_guard, whose sensor it
+// uses and whose limits still apply.
 type ForceControlConfig struct {
 	// TargetForce is the force to draw with, over the guard's baseline, in the
 	// sensor's units.
@@ -82,7 +85,7 @@ func (c *ForceControlConfig) validate(guard *ForceGuardConfig) error {
 }
 
 // surfaceModel is a plane through the heights where the pen drew at its target
-// force. It outlives a drawing, so the next one on the same mat starts close.
+// force, over one drawing: a plane from one sheet says little about another.
 type surfaceModel struct {
 	ref    float64
 	pts    [][3]float64
@@ -129,14 +132,27 @@ func (m *surfaceModel) fit() {
 		sxz, syz = sxz+dx*dz, syz+dy*dz
 	}
 	m.a, m.mx, m.my, m.fitted = mz, mx, my, true
-	// Points along one line fix no tilt across it; a level plane is the honest fit.
-	det := sxx*syy - sxy*sxy
-	if det < 1e-6*(sxx+syy)*(sxx+syy) || sxx+syy < 1 {
-		m.b, m.c = 0, 0
+	m.b, m.c = 0, 0
+	// Points along one line, or bunched together, fix no tilt; level is the honest fit.
+	if !m.spreadBothWays() {
 		return
 	}
-	m.b = (sxz*syy - syz*sxy) / det
-	m.c = (syz*sxx - sxz*sxy) / det
+	det := sxx*syy - sxy*sxy
+	if det < 1e-6*(sxx+syy)*(sxx+syy) {
+		return
+	}
+	clamp := func(v float64) float64 { return math.Max(-maxTilt, math.Min(maxTilt, v)) }
+	m.b = clamp((sxz*syy - syz*sxy) / det)
+	m.c = clamp((syz*sxx - sxz*sxy) / det)
+}
+
+func (m *surfaceModel) spreadBothWays() bool {
+	minX, maxX, minY, maxY := math.Inf(1), math.Inf(-1), math.Inf(1), math.Inf(-1)
+	for _, p := range m.pts {
+		minX, maxX = math.Min(minX, p[0]), math.Max(maxX, p[0])
+		minY, maxY = math.Min(minY, p[1]), math.Max(maxY, p[1])
+	}
+	return maxX-minX >= minTiltSpreadMM && maxY-minY >= minTiltSpreadMM
 }
 
 // forceController sets each pen-down point's height for one drawing.
@@ -147,6 +163,24 @@ type forceController struct {
 	// off is the local correction on top of the model, carried from point to
 	// point and stroke to stroke.
 	off float64
+	// air is the reading just before the pen came down. A wrist sensor reads
+	// differently while the arm moves than when it holds still, by more than a
+	// drawing's force, so contact is measured from here, not from the draw's baseline.
+	air     float64
+	haveAir bool
+}
+
+// noteAir takes the reading a move above the paper ended at.
+func (f *forceController) noteAir(raw float64) {
+	f.air, f.haveAir = raw, true
+}
+
+// contactForce is how far raw is from the reading just before the pen came down.
+func (f *forceController) contactForce(raw, baseline float64) float64 {
+	if f.haveAir {
+		return math.Abs(raw - f.air)
+	}
+	return math.Abs(raw - baseline)
 }
 
 func newForceController(cfg ForceControlConfig, model *surfaceModel, ref float64) *forceController {

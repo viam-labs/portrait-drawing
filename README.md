@@ -197,16 +197,23 @@ pen-down point's height from the force instead:
 | `gain_mm_per_unit` | number | no | How far one unit of force error moves the next point. Default 0.04, under the 0.1 that a 10 N/mm felt tip would overshoot at. |
 | `max_step_mm` | number | no | The most the height changes between two points while the pen touches. Default 0.05. |
 | `search_step_mm` | number | no | How far each point goes down while the pen touches nothing. Default 0.1. |
-| `max_offset_mm` | number | no | How far from the paper's configured height the pen may go. Default 1. |
+| `max_offset_mm` | number | no | How far from the paper's configured height the pen may go. Default 0.6: at 10 N/mm, a wrong surface estimate can't push the pen much past the guard's limit. |
 
-It needs `force_guard`, and uses its sensor, its baseline and its limits, which
-still stop the drawing as before. It adds no moves: the guard already reads the
-force through every move, so each point's height comes from the force the
-point before it ended at. A pen too light goes down by up to `max_step_mm`, one
-too heavy comes up, and one touching nothing goes down by `search_step_mm`.
+It needs `force_guard`, and uses its sensor and its limits, which still stop
+the drawing as before. It adds no moves: the guard already reads the force
+through every move, so each point's height comes from the force the point
+before it ended at. That force is measured from the reading at the end of the
+descent just before, with the pen 2 mm above the paper, not from the draw's
+baseline: a wrist sensor reads differently while the arm moves, on armfarm07 by
+about 1.3 N, more than the force it draws with. A pen too light goes down by up
+to `max_step_mm`, one too heavy comes up, and one touching nothing goes down by
+`search_step_mm`.
+
 Points drawn near the target teach a plane of where the paper is, which the
-next pen-down starts from, and which the next drawing on the same setup starts
-from too. `status` shows it in `last_force.surface`.
+next pen-down starts from. Each drawing learns its own: a plane from a name tag
+says little about a card across the mat. It stays level until its points spread
+30 mm both ways, since over a small patch noise reads as a steep slope, and its
+tilt is capped at 0.6 mm per 100 mm. `status` shows it in `last_force.surface`.
 
 What it cannot correct is a move that strays off its line between two points,
 so set `line_tolerance_mm` well under the working depth; the default, 0.5 mm,
