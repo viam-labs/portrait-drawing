@@ -465,9 +465,9 @@ tray say, and the writer carries its corners into every draw.
 | Attribute | Type | Required | Description |
 |---|---|---|---|
 | `drawer` | string | **yes** | The `drawer` whose arm writes the card. |
-| `paper_top_left_corner` | pose | **yes** | The tool pose with the pen tip on the card's top-left corner, as its reader sees it. Taught the same way as the drawer's; see [Which corner is top-left](#which-corner-is-top-left). |
+| `paper_top_left_corner` | pose | **yes**, unless every write carries a `paper` | The tool pose with the pen tip on the card's top-left corner, as its reader sees it. Taught the same way as the drawer's; see [Which corner is top-left](#which-corner-is-top-left). |
 | `paper_top_right_corner` | position | no | Where the pen tip touches the card's top-right corner. Sets which way the text runs; without it the card runs along the arm's +X. |
-| `paper_width_mm`, `paper_height_mm` | number | **yes** | The card. |
+| `paper_width_mm`, `paper_height_mm` | number | with the corner | The card. |
 | `fill` | number | no | Fraction of the card the text fills on whichever axis binds first. Default `0.8`. A long name is limited by the card's width, a short one by its height. |
 | `cap_height_mm` | number | no | Fix the capital height instead of filling. Text that would overflow the card at that height is refused rather than drawn off the edge. |
 | `stroke_font` | string | no | A single-stroke [Hershey](https://en.wikipedia.org/wiki/Hershey_fonts) face. Default `cursive`, a joined-up script; `futural` is a plain sans, `rowmans` and `timesr` are seriffed. |
@@ -497,6 +497,7 @@ much of the card as they can, which is not the same height.
 | `text` | string | What to write. Required. |
 | `cap_height_mm`, `fill` | number | Override the configured sizing for this call. |
 | `preview` | bool | Lay the text out and return the polylines without drawing. |
+| `paper` | object | The card to write on this time instead of the configured one, in the drawer's `paper` form; the queue sends the name tag its `paper_finder` found. |
 
 Returns the drawer's response plus the layout: `font`, `cap_mm`, the inked
 `bbox_w_mm` x `bbox_h_mm`, and `polylines_total`. A drawer that is paused
@@ -541,6 +542,29 @@ just do one job when asked.
 | `name_tag_command` | object | no | The DoCommand sent to `name_tag_writer`; every `{name}` in a string value is replaced with the visitor's name. Default `{"write": {"text": "{name}"}}`. |
 | `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
 | `state_file` | string | no | Where jobs are saved. Default a file named after the service in `$VIAM_MODULE_DATA`. |
+| `paper_finder` | string | no | A `paper-finder` that picks a blank sheet off the mat for each job. See [Sheets on a mat](#sheets-on-a-mat). Without it, jobs go on the drawer's and the writer's own fixed surfaces. |
+
+### Sheets on a mat
+
+With `paper_finder` set, each job asks it for the nearest blank sheet of its
+kind just before it starts: a card for a portrait, a name tag for a name tag or
+text job. The sheet goes with the draw as its `paper`, and with the writer's
+command as `paper` in its payload, so `name_tag_writer` must accept one, as
+`text-writer` does.
+
+- **A job keeps its sheet.** A portrait paused for a name tag, or interrupted by
+  a restart, resumes on the same card, not on whichever is nearest by then.
+  A sheet an unfinished portrait owns is never handed to another job, even if
+  it has too little on it to look used yet.
+- **No sheet, no start.** When the finder has no blank sheet of a kind, or
+  fails, jobs needing that kind wait, and `status` says so in `needs_paper`:
+  `[{"kind": "card", "since": "…"}]`, with an `error` if the finder failed. Jobs
+  needing the other kind carry on, so a missing name tag does not hold up a
+  portrait. Send `resume` once paper is down, and they look again.
+- **No swap wait.** A used sheet is never picked again, so the 8 s swap wait
+  below is off.
+- **A retried card gets a fresh tag**, since the one it failed on may be part
+  written. A retried portrait that had begun goes back to its own card.
 
 ### Behavior and caveats
 
@@ -580,10 +604,11 @@ just do one job when asked.
 | `enqueue_portrait` | `{"name": "Ada", "visitor": {…}}`, plus `"image_b64": "…"` to send the photo instead of reading `photo` | `{"job_id", "position"}` |
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
 | `enqueue_text` | `{"text": "Welcome", "cap_height_mm": 12, "fill": 0.6, "visitor": {…}}`; sent to the writer as `{"write": {"text", "cap_height_mm", "fill"}}`, bypassing `name_tag_command` | `{"job_id", "position"}` |
-| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary |
+| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary, and `needs_paper` while jobs wait for a sheet |
 | `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits, `text` for text jobs |
 | `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or card is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
+| `resume` | `{}` | `status`, after jobs waiting for paper look again |
 
 `visitor` is stored with the job and returned in summaries, for whatever tells the
 visitor their portrait is ready.

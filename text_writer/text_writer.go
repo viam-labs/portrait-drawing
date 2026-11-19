@@ -35,7 +35,8 @@ func init() {
 // Config is the text-writer service configuration. The card is its own
 // surface, taught the same way as the drawer's paper, and is sent along with
 // every draw so the drawer's arm writes here while its own paper stays where
-// portraits go.
+// portraits go. A write may carry its own card instead, such as a name tag the
+// paper finder found; without a configured card, every write must.
 type Config struct {
 	Drawer string `json:"drawer"`
 	// PaperTopLeftCorner is the tool pose with the pen tip on the card's
@@ -72,8 +73,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.Drawer == "" {
 		return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "drawer")
 	}
-	if err := cfg.paper().Validate(path, "paper_"); err != nil {
-		return nil, nil, err
+	// No card at all is fine, so long as every write brings one; part of one is a mistake.
+	if cfg.PaperTopLeftCorner != nil || cfg.PaperTopRightCorner != nil || cfg.PaperWidthMM != 0 || cfg.PaperHeightMM != 0 {
+		if err := cfg.paper().Validate(path, "paper_"); err != nil {
+			return nil, nil, err
+		}
 	}
 	if cfg.Fill < 0 || cfg.Fill > 1 {
 		return nil, nil, fmt.Errorf("fill must be in (0, 1], got %g", cfg.Fill)
@@ -101,11 +105,11 @@ func (cfg *Config) paper() *drawer.Paper {
 
 // paperPayload is the card as a plain map, which is what a DoCommand carries.
 // Built by hand because r3.Vector has no JSON tags and would come out as X/Y/Z.
-func (cfg *Config) paperPayload() (map[string]interface{}, error) {
+func paperPayload(p *drawer.Paper) (map[string]interface{}, error) {
 	vec := func(v r3.Vector) map[string]interface{} {
 		return map[string]interface{}{"x": v.X, "y": v.Y, "z": v.Z}
 	}
-	raw, err := json.Marshal(cfg.PaperTopLeftCorner.Orientation)
+	raw, err := json.Marshal(p.TopLeftCorner.Orientation)
 	if err != nil {
 		return nil, err
 	}
@@ -115,14 +119,14 @@ func (cfg *Config) paperPayload() (map[string]interface{}, error) {
 	}
 	out := map[string]interface{}{
 		"top_left_corner": map[string]interface{}{
-			"translation": vec(cfg.PaperTopLeftCorner.Translation),
+			"translation": vec(p.TopLeftCorner.Translation),
 			"orientation": orientation,
 		},
-		"width_mm":  cfg.PaperWidthMM,
-		"height_mm": cfg.PaperHeightMM,
+		"width_mm":  p.WidthMM,
+		"height_mm": p.HeightMM,
 	}
-	if cfg.PaperTopRightCorner != nil {
-		out["top_right_corner"] = vec(*cfg.PaperTopRightCorner)
+	if p.TopRightCorner != nil {
+		out["top_right_corner"] = vec(*p.TopRightCorner)
 	}
 	return out, nil
 }
@@ -175,7 +179,9 @@ func newWithClients(name resource.Name, logger logging.Logger, cfg *Config, draw
 	if cfg.Fill == 0 {
 		cfg.Fill = defaultFill
 	}
-	cfg.paper().CheckTopEdge(logger, "paper_")
+	if cfg.PaperTopLeftCorner != nil {
+		cfg.paper().CheckTopEdge(logger, "paper_")
+	}
 	return &textWriter{name: name, logger: logger, cfg: cfg, drawer: drawer, run: run}
 }
 
@@ -191,6 +197,8 @@ type writeArgs struct {
 	Fill        float64 `json:"fill,omitempty"`
 	// Preview lays the text out and returns the polylines without drawing.
 	Preview bool `json:"preview,omitempty"`
+	// Paper is the card to write on this time, in place of the configured one.
+	Paper *drawer.Paper `json:"paper,omitempty"`
 }
 
 func parseWriteArgs(payload interface{}) (*writeArgs, error) {
@@ -212,15 +220,31 @@ func parseWriteArgs(payload interface{}) (*writeArgs, error) {
 	if a.Fill < 0 || a.Fill > 1 {
 		return nil, fmt.Errorf("fill must be in (0, 1], got %g", a.Fill)
 	}
+	if a.Paper != nil {
+		if err := a.Paper.Validate("", "paper."); err != nil {
+			return nil, err
+		}
+	}
 	return &a, nil
 }
 
-func (w *textWriter) buildCLIArgs(a *writeArgs) []string {
+// card is the surface this write goes on: its own, or else the configured one.
+func (w *textWriter) card(a *writeArgs) (*drawer.Paper, error) {
+	if a.Paper != nil {
+		return a.Paper, nil
+	}
+	if w.cfg.PaperTopLeftCorner == nil {
+		return nil, errors.New("no card: none is configured and the write did not carry a paper")
+	}
+	return w.cfg.paper(), nil
+}
+
+func (w *textWriter) buildCLIArgs(a *writeArgs, card *drawer.Paper) []string {
 	f := func(v float64) string { return strconv.FormatFloat(v, 'f', -1, 64) }
 	args := []string{
 		"--text", a.Text,
-		"--width-mm", f(w.cfg.PaperWidthMM),
-		"--height-mm", f(w.cfg.PaperHeightMM),
+		"--width-mm", f(card.WidthMM),
+		"--height-mm", f(card.HeightMM),
 	}
 	switch {
 	case a.CapHeightMM > 0:
@@ -271,7 +295,11 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
-	stdout, err := w.run(ctx, w.buildCLIArgs(a)...)
+	card, err := w.card(a)
+	if err != nil {
+		return nil, fmt.Errorf("text-writer: %w", err)
+	}
+	stdout, err := w.run(ctx, w.buildCLIArgs(a, card)...)
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
@@ -289,7 +317,7 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 	delete(layout, "polylines")
 	layout["polylines_total"] = len(polylines)
 
-	paper, err := w.cfg.paperPayload()
+	paper, err := paperPayload(card)
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
