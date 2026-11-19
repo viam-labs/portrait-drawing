@@ -182,6 +182,22 @@ type forceRun struct {
 	// frozen sensor stays frozen from one move to the next.
 	last    float64
 	repeats int
+	// tail is the latest move's last few pen-down forces, which force control
+	// steers by.
+	tail    []float64
+	control *forceController
+}
+
+// endForce is the force the latest move ended at, if it read any with the pen down.
+func (r *forceRun) endForce() (float64, bool) {
+	if len(r.tail) == 0 {
+		return 0, false
+	}
+	var sum float64
+	for _, f := range r.tail {
+		sum += f
+	}
+	return sum / float64(len(r.tail)), true
 }
 
 func (r *forceRun) noteRaw(raw float64) {
@@ -196,17 +212,25 @@ func (r *forceRun) noteRaw(raw float64) {
 func (r *forceRun) record(clear bool, force float64) {
 	if clear {
 		r.lifted.record(force)
-	} else {
-		r.penDown.record(force)
+		return
+	}
+	r.penDown.record(force)
+	r.tail = append(r.tail, force)
+	if len(r.tail) > forceTailSamples {
+		r.tail = r.tail[1:]
 	}
 }
 
 func (r *forceRun) summary() map[string]interface{} {
-	return map[string]interface{}{
+	out := map[string]interface{}{
 		"baseline": r.baseline,
 		"pen_down": r.penDown.summary(),
 		"lifted":   r.lifted.summary(),
 	}
+	if r.control != nil {
+		out["surface"] = r.control.summary()
+	}
+	return out
 }
 
 // finishForceRun keeps the run for status and logs it, so the limits can be set
@@ -223,6 +247,10 @@ func (d *drawer) finishForceRun(run *forceRun) {
 		d.forceGuard.reading, run.baseline,
 		run.penDown.mean(), run.penDown.peak, run.penDown.samples,
 		run.lifted.mean(), run.lifted.peak, run.lifted.samples)
+	if c := run.control; c != nil && c.model.fitted {
+		d.logger.Infof("drawer: force control surface from %d points: z %.2f at (%.0f, %.0f), %+.2f mm/100mm in x, %+.2f in y; offset %+.2f mm",
+			len(c.model.pts), c.model.a, c.model.mx, c.model.my, 100*c.model.b, 100*c.model.c, c.off)
+	}
 }
 
 type excessForceError struct {
@@ -268,6 +296,7 @@ func (d *drawer) watchForce(ctx context.Context, run *forceRun, clear bool, move
 		return move(ctx)
 	}
 	limit := d.forceGuard.limit(clear)
+	run.tail = run.tail[:0]
 	moveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tripped := make(chan error, 1)

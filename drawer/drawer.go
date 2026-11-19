@@ -80,6 +80,11 @@ type Config struct {
 	PreviewCamera      string                                     `json:"preview_camera,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 	ForceGuard         *ForceGuardConfig                          `json:"force_guard,omitempty"`
+	ForceControl       *ForceControlConfig                        `json:"force_control,omitempty"`
+	// LineToleranceMM is how far a pen-on-paper move may stray from its straight
+	// line, up and down included. A pen with no give needs it well under the
+	// depth its force builds over, a few tenths of a millimetre.
+	LineToleranceMM float64 `json:"line_tolerance_mm,omitempty"`
 }
 
 // AllowedCollision is a pair of frame names permitted to overlap. Use the names
@@ -213,6 +218,14 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		return nil, nil, errors.New("photo is set but stroke_generator is not; capture_and_draw needs both")
 	}
 	deps := []string{cfg.Arm}
+	if cfg.LineToleranceMM < 0 {
+		return nil, nil, fmt.Errorf("line_tolerance_mm must be >= 0 (0 uses the default), got %g", cfg.LineToleranceMM)
+	}
+	if cfg.ForceControl != nil {
+		if err := cfg.ForceControl.validate(cfg.ForceGuard); err != nil {
+			return nil, nil, err
+		}
+	}
 	if cfg.ForceGuard != nil {
 		liftOff := cfg.LiftOffZMM
 		if liftOff == 0 {
@@ -258,6 +271,9 @@ type drawer struct {
 
 	// lastForce is what the force guard measured over the most recent draw.
 	lastForce *forceRun
+	// surface is what force control has learned of where the paper is; drawings
+	// run one at a time, so only executeDraw touches it.
+	surface *surfaceModel
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -987,7 +1003,7 @@ func (d *drawer) constraints(linear bool) *motionplan.Constraints {
 	var linConstraints []motionplan.LinearConstraint
 	if linear {
 		linConstraints = []motionplan.LinearConstraint{{
-			LineToleranceMm:          drawLineToleranceMM,
+			LineToleranceMm:          d.lineToleranceMM(),
 			OrientationToleranceDegs: drawOrientationToleranceDegrees,
 		}}
 	}
@@ -995,6 +1011,13 @@ func (d *drawer) constraints(linear bool) *motionplan.Constraints {
 		return nil
 	}
 	return motionplan.NewConstraints(linConstraints, nil, nil, d.collisionSpecs)
+}
+
+func (d *drawer) lineToleranceMM() float64 {
+	if d.cfg.LineToleranceMM > 0 {
+		return d.cfg.LineToleranceMM
+	}
+	return drawLineToleranceMM
 }
 
 func collisionSpecs(pairs []AllowedCollision) []motionplan.CollisionSpecification {
@@ -1018,7 +1041,9 @@ type waypoint struct {
 	x, y, z float64
 	linear  bool
 	// clear marks a move that stays above zClear, where a bare tip touches nothing.
-	clear        bool
+	clear bool
+	// contact marks a move that ends with the pen on the paper.
+	contact      bool
 	endsPolyline bool
 	label        string
 }
@@ -1048,10 +1073,13 @@ func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zU
 		if checkContact {
 			out = append(out, waypoint{x: sx, y: sy, z: zClear, linear: true, clear: true, label: fmt.Sprintf("polyline %d descent", i)})
 		}
-		out = append(out, waypoint{x: sx, y: sy, z: zDown, linear: true, label: fmt.Sprintf("polyline %d pen-down", i)})
+		out = append(out, waypoint{x: sx, y: sy, z: zDown, linear: true, contact: true, label: fmt.Sprintf("polyline %d pen-down", i)})
 		for j := 1; j < len(poly); j++ {
 			px, py := paperToWorld(corner, across, poly[j])
-			out = append(out, waypoint{x: px, y: py, z: zDown, linear: true, label: fmt.Sprintf("polyline %d point %d", i, j)})
+			out = append(out, waypoint{
+				x: px, y: py, z: zDown, linear: true, contact: true,
+				label: fmt.Sprintf("polyline %d point %d", i, j),
+			})
 		}
 		lx, ly := paperToWorld(corner, across, poly[len(poly)-1])
 		out = append(out, waypoint{
@@ -1094,6 +1122,14 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 
 	waypoints := drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear)
 	run := &forceRun{}
+	var control *forceController
+	if d.cfg.ForceControl != nil && d.forceGuard != nil {
+		if d.surface == nil || math.Abs(d.surface.ref-zDown) > surfaceResetMM {
+			d.surface = newSurfaceModel(zDown)
+		}
+		control = newForceController(d.cfg.ForceControl.withDefaults(), d.surface, zDown)
+		run.control = control
+	}
 	defer d.finishForceRun(run)
 	if len(waypoints) > 0 {
 		above := spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
@@ -1113,7 +1149,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
-		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
+		z := wp.z
+		if control != nil && wp.contact {
+			z = control.height(wp.x, wp.y)
+		}
+		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: z}, orientation)
 		if err := d.guardedMove(ctx, fs, target, run, wp.linear, wp.clear); err != nil {
 			wrapped := fmt.Errorf("drawer: %s: %w", wp.label, err)
 			if ctx.Err() != nil {
@@ -1131,6 +1171,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 				d.setFailed(wrapped)
 			}
 			return nil, wrapped
+		}
+		if control != nil && wp.contact {
+			if force, ok := run.endForce(); ok {
+				control.observe(wp.x, wp.y, z, force)
+			}
 		}
 		if !wp.endsPolyline {
 			continue

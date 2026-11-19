@@ -55,7 +55,9 @@ DoCommand, no image data passing through your hands.
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
 | `allowed_collisions` | array | no | Frame pairs the planner should not treat as a collision. See [Anything bolted to the arm](#anything-bolted-to-the-arm). |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
+| `line_tolerance_mm` | number | no | How far a pen-on-paper move may stray from its straight line, up and down included. Default 0.5; a rigid pen needs about 0.05. |
 | `force_guard` | object | no | Stops a drawing when a sensor reads more force than a bare marker tip should produce. See [A cap left on the marker](#a-cap-left-on-the-marker). |
+| `force_control` | object | no | Draws at a target force rather than a fixed height. See [Drawing at a force instead of a height](#drawing-at-a-force-instead-of-a-height). |
 
 ### Which corner is top-left
 
@@ -174,6 +176,41 @@ logs what the force did over its baseline, and `status` keeps the latest as
 `pen_down` is what `max_force` is held to and `lifted` what `contact_force` is,
 so these are the numbers to set them from: start with both limits generous,
 draw with the cap off, and bring each down to a margin above its `peak`.
+
+### Drawing at a force instead of a height
+
+A pen with no give, held rigidly, has a few tenths of a millimetre between not
+touching and pressing hard: on armfarm07 a felt tip on card goes from first
+contact to about 2.5 N in 0.2 mm, and one card sat 0.5 mm higher at one side
+than the other. No single height draws all of it. `force_control` sets each
+pen-down point's height from the force instead:
+
+```json
+"force_control": { "target_force": 1.0 },
+"line_tolerance_mm": 0.05
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `target_force` | number | no | The force to draw with over the guard's baseline, in the sensor's units. Default 1. Must be below `force_guard.max_force`. |
+| `gain_mm_per_unit` | number | no | How far one unit of force error moves the next point. Default 0.04, under the 0.1 that a 10 N/mm felt tip would overshoot at. |
+| `max_step_mm` | number | no | The most the height changes between two points while the pen touches. Default 0.05. |
+| `search_step_mm` | number | no | How far each point goes down while the pen touches nothing. Default 0.1. |
+| `max_offset_mm` | number | no | How far from the paper's configured height the pen may go. Default 1. |
+
+It needs `force_guard`, and uses its sensor, its baseline and its limits, which
+still stop the drawing as before. It adds no moves: the guard already reads the
+force through every move, so each point's height comes from the force the
+point before it ended at. A pen too light goes down by up to `max_step_mm`, one
+too heavy comes up, and one touching nothing goes down by `search_step_mm`.
+Points drawn near the target teach a plane of where the paper is, which the
+next pen-down starts from, and which the next drawing on the same setup starts
+from too. `status` shows it in `last_force.surface`.
+
+What it cannot correct is a move that strays off its line between two points,
+so set `line_tolerance_mm` well under the working depth; the default, 0.5 mm,
+is right for a sprung pen. A lower `lift_off_z_mm` saves travel time between
+strokes, and a rigid pen needs no more than a few millimetres.
 
 ### The rest pose
 
