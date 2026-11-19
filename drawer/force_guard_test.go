@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/logging"
@@ -107,14 +108,14 @@ func untilCanceled(ctx context.Context) error {
 
 func TestWatchForce_normalForceLetsTheMoveFinish(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return 3.0, nil })
-	err := d.watchForce(context.Background(), 0,false, func(context.Context) error { return nil })
+	err := d.watchForce(context.Background(), &forceRun{}, false, func(context.Context) error { return nil })
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 }
 
 func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
-	err := d.watchForce(context.Background(), 0,false, untilCanceled)
+	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "cap")
 	test.That(t, stops.Load(), test.ShouldEqual, 1)
@@ -122,7 +123,7 @@ func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 
 func TestWatchForce_clearMoveUsesTheContactLimit(t *testing.T) {
 	d, _ := guardedDrawer(t, func() (interface{}, error) { return 3.0, nil })
-	err := d.watchForce(context.Background(), 0,true, untilCanceled)
+	err := d.watchForce(context.Background(), &forceRun{}, true, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "before the pen")
 }
@@ -130,12 +131,61 @@ func TestWatchForce_clearMoveUsesTheContactLimit(t *testing.T) {
 func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
 	// A wrist sensor carrying the tool reads far from zero with nothing touching.
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -18.4, nil })
-	err := d.watchForce(context.Background(), -18.0, true, func(context.Context) error { return nil })
+	err := d.watchForce(context.Background(), &forceRun{baseline: -18.0}, true, func(context.Context) error { return nil })
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 
-	err = d.watchForce(context.Background(), -12.0, false, untilCanceled)
+	err = d.watchForce(context.Background(), &forceRun{baseline: -12.0}, false, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
+}
+
+func TestForceRun_keepsLiftedAndPenDownApart(t *testing.T) {
+	var reads atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) {
+		reads.Add(1)
+		return -18.5, nil
+	})
+	run := &forceRun{baseline: -18.0}
+	// A second read starting means the first sample is already recorded.
+	untilSampled := func(context.Context) error {
+		for reads.Load() < 2 {
+			time.Sleep(time.Millisecond)
+		}
+		return nil
+	}
+	test.That(t, d.watchForce(context.Background(), run, true, untilSampled), test.ShouldBeNil)
+	test.That(t, run.penDown.samples, test.ShouldEqual, 0)
+	test.That(t, run.lifted.samples, test.ShouldBeGreaterThan, 0)
+	test.That(t, run.lifted.mean(), test.ShouldAlmostEqual, 0.5, 1e-9)
+	test.That(t, run.lifted.peak, test.ShouldAlmostEqual, 0.5, 1e-9)
+
+	run.record(false, 2)
+	run.record(false, 4)
+	test.That(t, run.penDown.mean(), test.ShouldAlmostEqual, 3.0, 1e-9)
+	test.That(t, run.penDown.peak, test.ShouldEqual, 4.0)
+}
+
+func TestStatus_reportsTheLastForceRun(t *testing.T) {
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
+	_, has := d.status()["last_force"]
+	test.That(t, has, test.ShouldBeFalse)
+
+	d.finishForceRun(&forceRun{})
+	_, has = d.status()["last_force"]
+	test.That(t, has, test.ShouldBeFalse)
+
+	run := &forceRun{baseline: -18}
+	run.record(false, 2)
+	run.record(false, 4)
+	d.finishForceRun(run)
+	force, ok := d.status()["last_force"].(map[string]interface{})
+	test.That(t, ok, test.ShouldBeTrue)
+	test.That(t, force["baseline"], test.ShouldEqual, -18.0)
+	penDown, ok := force["pen_down"].(map[string]interface{})
+	test.That(t, ok, test.ShouldBeTrue)
+	test.That(t, penDown["mean"], test.ShouldEqual, 3.0)
+	test.That(t, penDown["peak"], test.ShouldEqual, 4.0)
+	test.That(t, penDown["samples"], test.ShouldEqual, 2)
 }
 
 func TestMeasureBaseline_averagesTheSamples(t *testing.T) {
@@ -168,7 +218,7 @@ func TestMeasureBaseline_propagatesReadErrors(t *testing.T) {
 
 func TestWatchForce_unreadableSensorStopsTheMove(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return nil, errors.New("unplugged") })
-	err := d.watchForce(context.Background(), 0,false, untilCanceled)
+	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "unplugged")
 	test.That(t, faultOf(err), test.ShouldEqual, "")
@@ -177,7 +227,7 @@ func TestWatchForce_unreadableSensorStopsTheMove(t *testing.T) {
 
 func TestWatchForce_nonNumericReadingStopsTheMove(t *testing.T) {
 	d, _ := guardedDrawer(t, func() (interface{}, error) { return "high", nil })
-	err := d.watchForce(context.Background(), 0,false, untilCanceled)
+	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "not a number")
 }
@@ -185,7 +235,7 @@ func TestWatchForce_nonNumericReadingStopsTheMove(t *testing.T) {
 func TestWatchForce_withoutAGuardJustMoves(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
 	moved := false
-	err := d.watchForce(context.Background(), 0,true, func(context.Context) error {
+	err := d.watchForce(context.Background(), &forceRun{}, true, func(context.Context) error {
 		moved = true
 		return nil
 	})

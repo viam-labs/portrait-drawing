@@ -252,7 +252,10 @@ type drawer struct {
 	collisionSpecs  []motionplan.CollisionSpecification
 	forceGuard      *forceGuard
 
-	mu      sync.Mutex
+	// lastForce is what the force guard measured over the most recent draw.
+	lastForce *forceRun
+
+	mu       sync.Mutex
 	cancelFn context.CancelFunc
 	progress progress
 	// drawDone is closed when the running draw releases its slot, so pause can
@@ -367,6 +370,9 @@ func (d *drawer) status() map[string]interface{} {
 	}
 	if p.fault != "" {
 		out["fault"] = p.fault
+	}
+	if d.lastForce != nil {
+		out["last_force"] = d.lastForce.summary()
 	}
 	if d.held != nil {
 		out["resumable"] = true
@@ -1078,10 +1084,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	drawn, nextProgress := startAt, progressStepPercent
 
 	waypoints := drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear)
-	var baseline float64
+	run := &forceRun{}
+	defer d.finishForceRun(run)
 	if len(waypoints) > 0 {
 		above := spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
-		baseline, err = d.forceBaseline(ctx, fs, above)
+		run.baseline, err = d.forceBaseline(ctx, fs, above)
 		if err != nil {
 			wrapped := fmt.Errorf("drawer: %w", err)
 			if ctx.Err() != nil {
@@ -1098,7 +1105,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
 		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: wp.z}, orientation)
-		if err := d.guardedMove(ctx, fs, target, baseline, wp.linear, wp.clear); err != nil {
+		if err := d.guardedMove(ctx, fs, target, run, wp.linear, wp.clear); err != nil {
 			wrapped := fmt.Errorf("drawer: %s: %w", wp.label, err)
 			if ctx.Err() != nil {
 				d.setPhase(phaseCanceled)

@@ -20,7 +20,7 @@ const (
 	// baselineHeightMM is above the paper by more than a marker cap adds, so a
 	// capped pen is still in the air when the baseline is taken.
 	baselineHeightMM = 40.0
-	faultExcessForce       = "excess_force"
+	faultExcessForce = "excess_force"
 )
 
 // ForceGuardConfig stops a drawing when the pen meets more resistance than a
@@ -137,6 +137,67 @@ func (g *forceGuard) read(ctx context.Context) (float64, error) {
 	}
 }
 
+type forceStats struct {
+	samples   int
+	sum, peak float64
+}
+
+func (s *forceStats) record(force float64) {
+	s.samples++
+	s.sum += force
+	s.peak = math.Max(s.peak, force)
+}
+
+func (s *forceStats) mean() float64 {
+	if s.samples == 0 {
+		return 0
+	}
+	return s.sum / float64(s.samples)
+}
+
+func (s *forceStats) summary() map[string]interface{} {
+	return map[string]interface{}{"mean": s.mean(), "peak": s.peak, "samples": s.samples}
+}
+
+// forceRun is one draw's baseline and what the force did over it, split the way
+// the limits are: lifted is what contact_force is held to, penDown max_force.
+type forceRun struct {
+	baseline        float64
+	lifted, penDown forceStats
+}
+
+func (r *forceRun) record(clear bool, force float64) {
+	if clear {
+		r.lifted.record(force)
+	} else {
+		r.penDown.record(force)
+	}
+}
+
+func (r *forceRun) summary() map[string]interface{} {
+	return map[string]interface{}{
+		"baseline": r.baseline,
+		"pen_down": r.penDown.summary(),
+		"lifted":   r.lifted.summary(),
+	}
+}
+
+// finishForceRun keeps the run for status and logs it, so the limits can be set
+// from what a real drawing measured.
+func (d *drawer) finishForceRun(run *forceRun) {
+	if run.lifted.samples+run.penDown.samples == 0 {
+		return
+	}
+	d.mu.Lock()
+	d.lastForce = run
+	d.mu.Unlock()
+	d.logger.Infof(
+		"drawer: force %q over baseline %.3g: pen down mean %.3g peak %.3g (%d samples), lifted mean %.3g peak %.3g (%d samples)",
+		d.forceGuard.reading, run.baseline,
+		run.penDown.mean(), run.penDown.peak, run.penDown.samples,
+		run.lifted.mean(), run.lifted.peak, run.lifted.samples)
+}
+
 type excessForceError struct {
 	force, limit float64
 	clear        bool
@@ -154,16 +215,16 @@ func (e *excessForceError) Error() string {
 // guardedMove is planAndExecute with the force watched for the whole move. clear
 // marks a move that stays above the paper, held to the lower contact limit.
 func (d *drawer) guardedMove(
-	ctx context.Context, fs *referenceframe.FrameSystem, target spatialmath.Pose, baseline float64, linear, clear bool,
+	ctx context.Context, fs *referenceframe.FrameSystem, target spatialmath.Pose, run *forceRun, linear, clear bool,
 ) error {
-	return d.watchForce(ctx, baseline, clear, func(moveCtx context.Context) error {
+	return d.watchForce(ctx, run, clear, func(moveCtx context.Context) error {
 		return d.planAndExecute(moveCtx, fs, target, d.constraints(linear))
 	})
 }
 
 // watchForce runs move, canceling it and stopping the arm if the force strays
-// from baseline by more than the limit, either way, or cannot be read.
-func (d *drawer) watchForce(ctx context.Context, baseline float64, clear bool, move func(context.Context) error) error {
+// from the run's baseline by more than the limit, either way, or cannot be read.
+func (d *drawer) watchForce(ctx context.Context, run *forceRun, clear bool, move func(context.Context) error) error {
 	if d.forceGuard == nil {
 		return move(ctx)
 	}
@@ -181,7 +242,10 @@ func (d *drawer) watchForce(ctx context.Context, baseline float64, clear bool, m
 			if moveCtx.Err() != nil {
 				return
 			}
-			force := math.Abs(raw - baseline)
+			force := math.Abs(raw - run.baseline)
+			if err == nil {
+				run.record(clear, force)
+			}
 			switch {
 			case err != nil:
 				// A guard that cannot read is no guard, so the move does not go on without it.

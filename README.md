@@ -152,6 +152,22 @@ off and send `resume`, which redraws the stroke that tripped. A sensor that
 cannot be read fails the drawing the same way, without the `fault`, since an
 unreadable guard is not guarding anything.
 
+Every draw that ends — a portrait or a name tag, finished, paused or failed —
+logs what the force did over its baseline, and `status` keeps the latest as
+`last_force`:
+
+```json
+"last_force": {
+  "baseline": -18.2,
+  "pen_down": { "mean": 1.9, "peak": 3.4, "samples": 5210 },
+  "lifted": { "mean": 0.3, "peak": 0.8, "samples": 1480 }
+}
+```
+
+`pen_down` is what `max_force` is held to and `lifted` what `contact_force` is,
+so these are the numbers to set them from: start with both limits generous,
+draw with the cap off, and bring each down to a margin above its `peak`.
+
 ### The rest pose
 
 `home_pose` is where the arm lives between drawings: it returns there when a
