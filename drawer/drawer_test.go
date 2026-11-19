@@ -411,7 +411,7 @@ func TestGoToRestPose_noneConfigured(t *testing.T) {
 }
 
 func TestDrawWaypoints_approachIsNotLinear(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 5}}}, 0, r3.Vector{X: 100, Y: 200, Z: 50}, r3.Vector{X: 1}, 55, 50)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 5}}}, 0, r3.Vector{X: 100, Y: 200, Z: 50}, r3.Vector{X: 1}, 55, 50, 50)
 	test.That(t, len(wps), test.ShouldEqual, 4)
 
 	test.That(t, wps[0].label, test.ShouldEqual, "polyline 0 approach")
@@ -424,7 +424,7 @@ func TestDrawWaypoints_approachIsNotLinear(t *testing.T) {
 }
 
 func TestDrawWaypoints_everyPolylineTravelsFreely(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}}, {{5, 5}}, {{9, 9}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}}, {{5, 5}}, {{9, 9}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0, 0)
 	var free int
 	for _, wp := range wps {
 		if !wp.linear {
@@ -437,7 +437,7 @@ func TestDrawWaypoints_everyPolylineTravelsFreely(t *testing.T) {
 
 func TestDrawWaypoints_offsetsFromPaperCorner(t *testing.T) {
 	corner := r3.Vector{X: 100, Y: 200, Z: 50}
-	wps := drawWaypoints([]Polyline{{{3, 7}, {11, 13}}}, 0, corner, r3.Vector{X: 1}, 55, 50)
+	wps := drawWaypoints([]Polyline{{{3, 7}, {11, 13}}}, 0, corner, r3.Vector{X: 1}, 55, 50, 50)
 
 	test.That(t, wps[1].label, test.ShouldEqual, "polyline 0 pen-down")
 	test.That(t, wps[1].x, test.ShouldEqual, 103.0)
@@ -453,14 +453,14 @@ func TestDrawWaypoints_offsetsFromPaperCorner(t *testing.T) {
 // above with Z up, clockwise means a negative Z cross product; positive would
 // mean the drawing comes out mirrored.
 func TestDrawWaypoints_keepsHandednessFromAbove(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 10}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 10}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0, 0)
 	a, b, c := wps[1], wps[2], wps[3]
 	cross := (b.x-a.x)*(c.y-b.y) - (b.y-a.y)*(c.x-b.x)
 	test.That(t, cross, test.ShouldBeLessThan, 0)
 }
 
 func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 20}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 20}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0, 0)
 	last := wps[len(wps)-1]
 	test.That(t, last.label, test.ShouldEqual, "polyline 0 pen-up")
 	test.That(t, last.x, test.ShouldEqual, 10.0)
@@ -469,7 +469,7 @@ func TestDrawWaypoints_penUpReturnsToLastPoint(t *testing.T) {
 }
 
 func TestDrawWaypoints_onlyPenUpEndsAPolyline(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}}}, 0, r3.Vector{}, r3.Vector{X: 1}, 5, 0, 0)
 	var ends int
 	for _, wp := range wps {
 		if wp.endsPolyline {
@@ -680,7 +680,7 @@ func TestDoCommand_statusVerb(t *testing.T) {
 func TestDrawWaypoints_pageFollowsTaughtTopEdge(t *testing.T) {
 	corner := r3.Vector{X: 100, Y: 200}
 	// Top edge taught along +Y: across is +Y, so down the page is +X.
-	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 5}}}, 0, corner, r3.Vector{Y: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 0}, {10, 5}}}, 0, corner, r3.Vector{Y: 1}, 5, 0, 0)
 	test.That(t, wps[2].x, test.ShouldAlmostEqual, 100.0)
 	test.That(t, wps[2].y, test.ShouldAlmostEqual, 210.0)
 	test.That(t, wps[3].x, test.ShouldAlmostEqual, 105.0)
@@ -729,7 +729,7 @@ func TestParseDrawPayload_startAt(t *testing.T) {
 }
 
 func TestDrawWaypoints_startsPartWayWithAbsoluteLabels(t *testing.T) {
-	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}, {6, 6}}}, 1, r3.Vector{}, r3.Vector{X: 1}, 5, 0)
+	wps := drawWaypoints([]Polyline{{{0, 0}, {1, 1}}, {{5, 5}, {6, 6}}}, 1, r3.Vector{}, r3.Vector{X: 1}, 5, 0, 0)
 	test.That(t, wps[0].label, test.ShouldEqual, "polyline 1 approach")
 	test.That(t, wps[0].x, test.ShouldEqual, 5.0)
 	var ends int

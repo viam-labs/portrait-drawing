@@ -2,7 +2,8 @@
   import { onDestroy, onMount } from 'svelte'
   import type { RobotClient } from '@viamrobotics/sdk'
   import { lookedFor, machineTarget } from './machine'
-  import { connect, drawerStatus, frameURL, type DrawerStatus } from './client'
+  import { connect, drawerStatus, frameURL, resumeDrawing, type DrawerStatus } from './client'
+  import CapAlert from './lib/CapAlert.svelte'
   import Panel from './lib/Panel.svelte'
   import Progress from './lib/Progress.svelte'
   import Phase from './lib/Phase.svelte'
@@ -41,6 +42,12 @@
     // capture, and after any module restart, since the buffer is in memory.
     photo = swap(photo, await frameURL(c, 'photo').catch(() => null))
     lineArt = swap(lineArt, await frameURL(c, 'line-preview').catch(() => null))
+  }
+
+  function resume() {
+    // The call stays open for the rest of the drawing; however it ends, the
+    // status poll reports it, so its own result is not needed.
+    if (client) resumeDrawing(client, 'drawer').catch(() => {})
   }
 
   onMount(async () => {
@@ -94,6 +101,7 @@
         <p class="muted">{statusError}</p>
       </Panel>
     {/if}
+    <CapAlert {status} onresume={resume} />
     <Progress {status} />
     <div class="grid">
       <Panel title="Photo" subtitle="what the camera captured">

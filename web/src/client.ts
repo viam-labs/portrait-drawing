@@ -12,6 +12,8 @@ export interface DrawerStatus {
   points_total?: number
   elapsed_sec?: number
   last_error?: string
+  fault?: string
+  resumable?: boolean
 }
 
 export async function connect(target: MachineTarget): Promise<RobotClient> {
@@ -40,4 +42,10 @@ export async function frameURL(client: RobotClient, name: string): Promise<strin
 export async function drawerStatus(client: RobotClient, name: string): Promise<DrawerStatus> {
   const generic = new GenericServiceClient(client, name)
   return (await generic.doCommand({ status: {} })) as unknown as DrawerStatus
+}
+
+/** Resolves only when the resumed drawing ends, which can be minutes later. */
+export async function resumeDrawing(client: RobotClient, name: string): Promise<void> {
+  const generic = new GenericServiceClient(client, name)
+  await generic.doCommand({ resume: {} })
 }

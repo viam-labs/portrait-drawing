@@ -56,6 +56,9 @@ DoCommand, no image data passing through your hands.
 | `preview_camera` | string | no | A frame-buffer camera the drawer pushes rendered previews into, so previews are viewable in the Viam app instead of coming back as base64. |
 | `allowed_collisions` | array | no | Frame pairs the planner should not treat as a collision. See [Anything bolted to the arm](#anything-bolted-to-the-arm). |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
+| `line_tolerance_mm` | number | no | How far a pen-on-paper move may stray from its straight line, up and down included. Default 0.5; a rigid pen needs about 0.05. |
+| `force_guard` | object | no | Stops a drawing when a sensor reads more force than a bare marker tip should produce. See [A cap left on the marker](#a-cap-left-on-the-marker). |
+| `force_control` | object | no | Draws at a target force rather than a fixed height. See [Drawing at a force instead of a height](#drawing-at-a-force-instead-of-a-height). |
 
 ### Which corner is top-left
 
@@ -108,6 +111,107 @@ Use the frame names exactly as the planner prints them in that error. Note that 
 component's geometry hangs off its `_origin` frame, not its bare name.
 
 Allowances apply to every move the drawer plans, travel and drawing alike.
+
+### A cap left on the marker
+
+A capped marker is longer and blunter than a bare tip: it reaches the paper
+before the pen is all the way down, and it pushes back harder once it is there.
+`force_guard` watches a `sensor` component for both. This example is for a
+`viam:ufactory:ft_sensor`, whose readings are in newtons:
+
+```json
+"force_guard": {
+  "sensor": "ft-sensor",
+  "reading": "Fz_N",
+  "max_force": 5,
+  "contact_force": 1,
+  "contact_margin_mm": 2
+}
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `sensor` | string | **yes** | A sensor component whose readings include the force on the pen. |
+| `reading` | string | **yes** | The key in the sensor's readings to watch: the axis the pen pushes along, `Fz_N` for a pen in line with the wrist. |
+| `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units, measured from the baseline below. Set it a little above the most you see in a normal drawing. |
+| `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
+| `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
+| `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off. Without it the arm goes to `home_pose`. |
+
+A wrist sensor reads the weight of the pen holder and its own bias even with
+nothing touching — tens of newtons is normal. So every draw and every `resume`
+first holds the pen 40 mm above the first stroke, averages the reading there,
+and measures both limits from that baseline, in either direction. The sensor's
+own zero is left alone. If those samples are all identical the draw fails
+before it starts: a live sensor always has noise, and a `ft_sensor` whose
+controller stream is off reads exactly zero on every axis, which would
+otherwise look like a pen that never touches anything.
+
+A sensor can also stop updating partway through a drawing, when it loses its
+stream or latches an overload, and go on returning its last reading as if it
+were live. So a reading that stays exactly the same for 25 polls in a row, about
+half a second, stops the drawing the same way, without the `fault`: power-cycle
+the arm's controller if the sensor latched an overload.
+
+The sensor is polled every 20 ms through every move of a drawing. Each descent
+is made in two moves, down to the margin and then onto the paper, so the limit
+changes at a known height. When a limit is passed the arm stops, lifts the pen
+straight up, and goes to `retreat_pose`, or else the rest pose. `status` then reports the job as
+`failed` with `"fault": "excess_force"`, and it stays resumable: take the cap
+off and send `resume`, which redraws the stroke that tripped. A sensor that
+cannot be read fails the drawing the same way, without the `fault`, since an
+unreadable guard is not guarding anything.
+
+Every draw that ends — a portrait or a name tag, finished, paused or failed —
+logs what the force did over its baseline, and `status` keeps the latest as
+`last_force`:
+
+```json
+"last_force": {
+  "baseline": -18.2,
+  "pen_down": { "mean": 1.9, "peak": 3.4, "samples": 5210 },
+  "lifted": { "mean": 0.3, "peak": 0.8, "samples": 1480 }
+}
+```
+
+`pen_down` is what `max_force` is held to and `lifted` what `contact_force` is,
+so these are the numbers to set them from: start with both limits generous,
+draw with the cap off, and bring each down to a margin above its `peak`.
+
+### Drawing at a force instead of a height
+
+A pen with no give, held rigidly, has a few tenths of a millimetre between not
+touching and pressing hard: on armfarm07 a felt tip on card goes from first
+contact to about 2.5 N in 0.2 mm, and one card sat 0.5 mm higher at one side
+than the other. No single height draws all of it. `force_control` sets each
+pen-down point's height from the force instead:
+
+```json
+"force_control": { "target_force": 1.0 },
+"line_tolerance_mm": 0.05
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `target_force` | number | no | The force to draw with over the guard's baseline, in the sensor's units. Default 1. Must be below `force_guard.max_force`. |
+| `gain_mm_per_unit` | number | no | How far one unit of force error moves the next point. Default 0.04, under the 0.1 that a 10 N/mm felt tip would overshoot at. |
+| `max_step_mm` | number | no | The most the height changes between two points while the pen touches. Default 0.05. |
+| `search_step_mm` | number | no | How far each point goes down while the pen touches nothing. Default 0.1. |
+| `max_offset_mm` | number | no | How far from the paper's configured height the pen may go. Default 1. |
+
+It needs `force_guard`, and uses its sensor, its baseline and its limits, which
+still stop the drawing as before. It adds no moves: the guard already reads the
+force through every move, so each point's height comes from the force the
+point before it ended at. A pen too light goes down by up to `max_step_mm`, one
+too heavy comes up, and one touching nothing goes down by `search_step_mm`.
+Points drawn near the target teach a plane of where the paper is, which the
+next pen-down starts from, and which the next drawing on the same setup starts
+from too. `status` shows it in `last_force.surface`.
+
+What it cannot correct is a move that strays off its line between two points,
+so set `line_tolerance_mm` well under the working depth; the default, 0.5 mm,
+is right for a sprung pen. A lower `lift_off_z_mm` saves travel time between
+strokes, and a rigid pen needs no more than a few millimetres.
 
 ### The rest pose
 
@@ -267,7 +371,9 @@ so this is how you find out what is happening — or whether anything is.
 
 `state` moves through `idle` → `moving_to_home_pose` → `capturing` →
 `generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
-(with `last_error`). The counts appear once drawing starts.
+(with `last_error`, and `fault` when the cause is one a person can clear, such
+as `excess_force` from the [`force_guard`](#a-cap-left-on-the-marker)). The
+counts appear once drawing starts.
 
 Readable while a drawing is in flight: `executeDraw` holds the draw slot but not
 the mutex, so this does not queue behind it.
