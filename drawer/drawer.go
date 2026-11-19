@@ -271,9 +271,6 @@ type drawer struct {
 
 	// lastForce is what the force guard measured over the most recent draw.
 	lastForce *forceRun
-	// surface is what force control has learned of where the paper is; drawings
-	// run one at a time, so only executeDraw touches it.
-	surface *surfaceModel
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -1124,10 +1121,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	run := &forceRun{}
 	var control *forceController
 	if d.cfg.ForceControl != nil && d.forceGuard != nil {
-		if d.surface == nil || math.Abs(d.surface.ref-zDown) > surfaceResetMM {
-			d.surface = newSurfaceModel(zDown)
-		}
-		control = newForceController(d.cfg.ForceControl.withDefaults(), d.surface, zDown)
+		control = newForceController(d.cfg.ForceControl.withDefaults(), newSurfaceModel(zDown), zDown)
 		run.control = control
 	}
 	defer d.finishForceRun(run)
@@ -1172,9 +1166,14 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 			}
 			return nil, wrapped
 		}
-		if control != nil && wp.contact {
-			if force, ok := run.endForce(); ok {
-				control.observe(wp.x, wp.y, z, force)
+		if control != nil {
+			if raw, ok := run.endRaw(); ok {
+				switch {
+				case wp.contact:
+					control.observe(wp.x, wp.y, z, control.contactForce(raw, run.baseline))
+				case wp.clear:
+					control.noteAir(raw)
+				}
 			}
 		}
 		if !wp.endsPolyline {

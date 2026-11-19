@@ -182,14 +182,14 @@ type forceRun struct {
 	// frozen sensor stays frozen from one move to the next.
 	last    float64
 	repeats int
-	// tail is the latest move's last few pen-down forces, which force control
+	// tail is the latest move's last few raw readings, which force control
 	// steers by.
 	tail    []float64
 	control *forceController
 }
 
-// endForce is the force the latest move ended at, if it read any with the pen down.
-func (r *forceRun) endForce() (float64, bool) {
+// endRaw is the raw reading the latest move ended at, if it read any.
+func (r *forceRun) endRaw() (float64, bool) {
 	if len(r.tail) == 0 {
 		return 0, false
 	}
@@ -207,6 +207,10 @@ func (r *forceRun) noteRaw(raw float64) {
 		r.repeats = 1
 	}
 	r.last = raw
+	r.tail = append(r.tail, raw)
+	if len(r.tail) > forceTailSamples {
+		r.tail = r.tail[1:]
+	}
 }
 
 func (r *forceRun) record(clear bool, force float64) {
@@ -215,10 +219,6 @@ func (r *forceRun) record(clear bool, force float64) {
 		return
 	}
 	r.penDown.record(force)
-	r.tail = append(r.tail, force)
-	if len(r.tail) > forceTailSamples {
-		r.tail = r.tail[1:]
-	}
 }
 
 func (r *forceRun) summary() map[string]interface{} {
