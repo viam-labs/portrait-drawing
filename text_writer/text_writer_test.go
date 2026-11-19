@@ -99,7 +99,7 @@ func TestBuildCLIArgs(t *testing.T) {
 	cfg.StrokeFont, cfg.Join, cfg.SpacingMM = "futural", &off, 1.5
 	w, _ := newTestWriter(t, cfg, &fakeDrawer{}, "", nil)
 
-	args := strings.Join(w.buildCLIArgs(&writeArgs{Text: "Ada"}), " ")
+	args := strings.Join(w.buildCLIArgs(&writeArgs{Text: "Ada"}, w.cfg.paper()), " ")
 	test.That(t, args, test.ShouldContainSubstring, "--text Ada")
 	test.That(t, args, test.ShouldContainSubstring, "--width-mm 85.9 --height-mm 59.2")
 	test.That(t, args, test.ShouldContainSubstring, "--fill 0.8")
@@ -108,14 +108,14 @@ func TestBuildCLIArgs(t *testing.T) {
 	test.That(t, args, test.ShouldContainSubstring, "--spacing-mm 1.5")
 
 	// A per-call cap height wins over the configured sizing.
-	args = strings.Join(w.buildCLIArgs(&writeArgs{Text: "Ada", CapHeightMM: 12}), " ")
+	args = strings.Join(w.buildCLIArgs(&writeArgs{Text: "Ada", CapHeightMM: 12}, w.cfg.paper()), " ")
 	test.That(t, args, test.ShouldContainSubstring, "--cap-mm 12")
 	test.That(t, args, test.ShouldNotContainSubstring, "--fill")
 
 	ocfg := cardConfig()
 	ocfg.Outline, ocfg.Font, ocfg.CapHeightMM = true, "Helvetica", 10
 	outline, _ := newTestWriter(t, ocfg, &fakeDrawer{}, "", nil)
-	args = strings.Join(outline.buildCLIArgs(&writeArgs{Text: "Ada"}), " ")
+	args = strings.Join(outline.buildCLIArgs(&writeArgs{Text: "Ada"}, outline.cfg.paper()), " ")
 	test.That(t, args, test.ShouldContainSubstring, "--outline --font Helvetica")
 	test.That(t, args, test.ShouldContainSubstring, "--cap-mm 10")
 	test.That(t, args, test.ShouldNotContainSubstring, "--stroke-font")
@@ -180,4 +180,54 @@ func TestWriteErrors(t *testing.T) {
 
 	_, err = w.DoCommand(context.Background(), map[string]interface{}{"nope": nil})
 	test.That(t, err, test.ShouldNotBeNil)
+}
+
+// foundTag is a name tag as the paper finder hands it over.
+func foundTag() map[string]interface{} {
+	return map[string]interface{}{
+		"top_left_corner": map[string]interface{}{
+			"translation": map[string]interface{}{"x": 250.0, "y": 80.0, "z": 281.0},
+			"orientation": map[string]interface{}{"type": "ov_degrees", "value": map[string]interface{}{"x": 0.0, "y": 0.0, "z": -1.0, "th": 0.0}},
+		},
+		"top_right_corner": map[string]interface{}{"x": 250.0, "y": -2.0, "z": 281.0},
+		"width_mm":         82.0,
+		"height_mm":        53.0,
+	}
+}
+
+func TestWriteOnTheCardItBrings(t *testing.T) {
+	fake := &fakeDrawer{resp: map[string]interface{}{}}
+	w, args := newTestWriter(t, cardConfig(), fake, layoutJSON, nil)
+
+	_, err := w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada", "paper": foundTag()}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, strings.Join(*args, " "), test.ShouldContainSubstring, "--width-mm 82 --height-mm 53")
+	paper := fake.cmds[0]["draw"].(map[string]interface{})["paper"].(map[string]interface{})
+	test.That(t, paper["width_mm"], test.ShouldEqual, 82.0)
+	test.That(t, paper["top_left_corner"].(map[string]interface{})["translation"].(map[string]interface{})["x"], test.ShouldEqual, 250.0)
+	test.That(t, paper["top_right_corner"].(map[string]interface{})["y"], test.ShouldEqual, -2.0)
+}
+
+func TestWithNoCardConfiguredEveryWriteMustBringOne(t *testing.T) {
+	cfg := &Config{Drawer: "d"}
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+
+	fake := &fakeDrawer{resp: map[string]interface{}{}}
+	w, _ := newTestWriter(t, cfg, fake, layoutJSON, nil)
+	_, err = w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada"}})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "no card")
+
+	_, err = w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada", "paper": foundTag()}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(fake.cmds), test.ShouldEqual, 1)
+}
+
+func TestABadCardInTheWriteIsRefused(t *testing.T) {
+	bad := foundTag()
+	delete(bad, "width_mm")
+	_, err := parseWriteArgs(map[string]interface{}{"text": "Ada", "paper": bad})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "paper.width_mm")
 }

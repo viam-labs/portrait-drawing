@@ -34,6 +34,7 @@ type fakeDrawer struct {
 	steps      chan struct{}
 	stopped    chan struct{}
 	calls      []string
+	draws      []map[string]interface{}
 	failOnDraw error
 	// pauseGate, when set, holds a pause call back until it is closed, like a
 	// pause still in flight.
@@ -60,6 +61,7 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 				return nil, f.failOnDraw
 			}
 			f.starts = append(f.starts, start)
+			f.draws = append(f.draws, a)
 			f.done, f.total, f.running, f.pauseReq = start, len(polylines), true, false
 			f.mu.Unlock()
 			defer func() { f.stopped <- struct{}{} }()
@@ -676,4 +678,278 @@ func TestACanceledCardIsSwappedAndCloseSkipsTheWait(t *testing.T) {
 	s, err := h.q.jobSummary(next)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+}
+
+// fakeFinder hands out the sheets it is given, per kind.
+type fakeFinder struct {
+	mu     sync.Mutex
+	sheets map[string][]interface{}
+	err    error
+	calls  []string
+	// looking, when set, is told each time a search starts, and the search then
+	// waits for gate, like the arm still on its way to the survey pose.
+	looking chan string
+	gate    chan struct{}
+}
+
+func (f *fakeFinder) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	kind := cmd["find"].(map[string]interface{})["kind"].(string)
+	if f.looking != nil {
+		f.looking <- kind
+		<-f.gate
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, kind)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return map[string]interface{}{"sheets": f.sheets[kind]}, nil
+}
+
+func (f *fakeFinder) set(kind string, sheets ...interface{}) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sheets[kind] = sheets
+}
+
+func (f *fakeFinder) callsFor(kind string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func sheetAt(x, y float64) map[string]interface{} {
+	return map[string]interface{}{
+		"center": map[string]interface{}{"x": x, "y": y, "z": 280.0},
+		"paper":  map[string]interface{}{"top_left_corner": map[string]interface{}{"x": x}, "width_mm": 101.6},
+	}
+}
+
+func paperX(paper interface{}) float64 {
+	return paper.(map[string]interface{})["top_left_corner"].(map[string]interface{})["x"].(float64)
+}
+
+func withFinder(h *harness) *fakeFinder {
+	f := &fakeFinder{sheets: map[string][]interface{}{}}
+	h.q.finder = f
+	return f
+}
+
+func needsPaper(h *harness) []interface{} {
+	n, _ := h.q.status()["needs_paper"].([]interface{})
+	return n
+}
+
+func (h *harness) waitNeedsPaper(t *testing.T, kind string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, n := range needsPaper(h) {
+			if n.(map[string]interface{})["kind"] == kind {
+				return
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the queue never asked for a %s", kind)
+}
+
+func TestAPortraitIsDrawnOnTheSheetTheFinderGives(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetCard, sheetAt(120, 0), sheetAt(300, 0))
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.drawUntil(t, id, stateDone)
+
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, paperX(h.drawer.draws[0]["paper"]), test.ShouldEqual, 120.0)
+}
+
+func TestANameTagIsWrittenOnTheTagTheFinderGives(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetNameTag, sheetAt(200, 50))
+	h.q.start()
+	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.waitState(t, id, stateDone)
+
+	h.writer.mu.Lock()
+	defer h.writer.mu.Unlock()
+	write := h.writer.cmds[0]["write"].(map[string]interface{})
+	test.That(t, write["text"], test.ShouldEqual, "Ada")
+	test.That(t, paperX(write["paper"]), test.ShouldEqual, 200.0)
+	test.That(t, f.callsFor(sheetNameTag), test.ShouldEqual, 1)
+}
+
+func TestWithNoSheetTheJobWaitsForResume(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.waitNeedsPaper(t, sheetCard)
+	s, err := h.q.jobSummary(id)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+
+	// Being woken alone does not make it look again; only resume does.
+	calls := f.callsFor(sheetCard)
+	f.set(sheetCard, sheetAt(150, 0))
+	h.q.nudge(h.q.wake)
+	time.Sleep(50 * time.Millisecond)
+	test.That(t, f.callsFor(sheetCard), test.ShouldEqual, calls)
+
+	out, err := h.q.DoCommand(context.Background(), map[string]interface{}{"resume": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, out["needs_paper"], test.ShouldBeNil)
+	h.drawUntil(t, id, stateDone)
+}
+
+func TestAMissingTagDoesNotHoldUpAPortrait(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetCard, sheetAt(150, 0))
+	h.q.start()
+	tag := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.drawUntil(t, portrait, stateDone)
+	h.waitNeedsPaper(t, sheetNameTag)
+	s, _ := h.q.jobSummary(tag)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+}
+
+func TestAFinderErrorIsReportedAndWaits(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.err = errors.New("not calibrated; run calibrate first")
+	h.q.start()
+	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.waitNeedsPaper(t, sheetCard)
+	n := needsPaper(h)[0].(map[string]interface{})
+	test.That(t, n["error"], test.ShouldContainSubstring, "not calibrated")
+}
+
+func TestAPausedPortraitKeepsItsSheetThroughANameTag(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetCard, sheetAt(120, 0))
+	f.set(sheetNameTag, sheetAt(250, 80))
+	h.q.start()
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.waitDrawing(t)
+	h.drawer.step(t)
+	h.drawer.step(t)
+
+	// The finder now sees a different card nearest; the portrait must not move to it.
+	f.set(sheetCard, sheetAt(60, 0))
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.drawUntil(t, portrait, stateDone)
+
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, len(h.drawer.draws), test.ShouldEqual, 2)
+	test.That(t, paperX(h.drawer.draws[1]["paper"]), test.ShouldEqual, 120.0)
+	test.That(t, f.callsFor(sheetCard), test.ShouldEqual, 1)
+}
+
+func TestASheetAnUnfinishedPortraitOwnsIsNotHandedOut(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	// The failed portrait's card has too little on it to look used.
+	h.q.jobs = []*Job{{
+		ID: "old", Kind: kindPortrait, State: stateFailed, NextPolyline: 1, Polylines: [][][2]float64{{{0, 0}, {1, 1}}, {{2, 2}, {3, 3}}},
+		Paper: sheetAt(120, 0)["paper"].(map[string]interface{}), SheetAt: &[2]float64{120, 0}, CreatedAt: time.Now(),
+	}}
+	f.set(sheetCard, sheetAt(121, 2), sheetAt(300, 0))
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.drawUntil(t, id, stateDone)
+
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, paperX(h.drawer.draws[0]["paper"]), test.ShouldEqual, 300.0)
+}
+
+func TestARetriedCardGetsAFreshTag(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetNameTag, sheetAt(200, 50))
+	h.writer.block = true
+	h.q.start()
+	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	<-h.writer.wrote
+	_ = h.q.Close(context.Background())
+	h.waitState(t, id, stateFailed)
+
+	h.writer.mu.Lock()
+	h.writer.block = false
+	h.writer.mu.Unlock()
+	f.set(sheetNameTag, sheetAt(260, 50))
+	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"retry_job": map[string]interface{}{"job_id": id}})
+	test.That(t, err, test.ShouldBeNil)
+	h.q.start()
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.waitState(t, id, stateDone)
+
+	h.writer.mu.Lock()
+	defer h.writer.mu.Unlock()
+	last := h.writer.cmds[len(h.writer.cmds)-1]["write"].(map[string]interface{})
+	test.That(t, paperX(last["paper"]), test.ShouldEqual, 260.0)
+}
+
+func TestConfigValidateAddsThePaperFinder(t *testing.T) {
+	deps, _, err := (&Config{Drawer: "d", StrokeGenerator: "g", PaperFinder: "finder"}).Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldContain, "finder")
+}
+
+func TestANameTagThatArrivesWhileThePortraitsCardIsFoundGoesFirst(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetCard, sheetAt(120, 0))
+	f.set(sheetNameTag, sheetAt(250, 80))
+	f.looking, f.gate = make(chan string, 4), make(chan struct{})
+	h.q.start()
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	test.That(t, <-f.looking, test.ShouldEqual, sheetCard)
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	close(f.gate)
+
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.drawer.mu.Lock()
+	started := len(h.drawer.draws)
+	h.drawer.mu.Unlock()
+	test.That(t, started, test.ShouldEqual, 0)
+	h.drawUntil(t, portrait, stateDone)
+	// The portrait kept the card found for it rather than looking again.
+	test.That(t, f.callsFor(sheetCard), test.ShouldEqual, 1)
+}
+
+func TestOnceTheQueueKnowsThereAreNoTagsATagDoesNotPauseThePortrait(t *testing.T) {
+	h := newHarness(t)
+	f := withFinder(h)
+	f.set(sheetCard, sheetAt(120, 0))
+	h.q.start()
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.waitNeedsPaper(t, sheetNameTag)
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.waitDrawing(t)
+	h.drawer.step(t)
+
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	h.drawUntil(t, portrait, stateDone)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, len(h.drawer.draws), test.ShouldEqual, 1)
+	test.That(t, h.drawer.calls, test.ShouldNotContain, "pause")
 }

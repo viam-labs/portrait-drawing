@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -67,6 +68,12 @@ const (
 	// paperSwapWait gives the operator time to swap in a fresh sheet before
 	// another job is drawn on the same surface.
 	paperSwapWait = 8 * time.Second
+	// heldSheetMM is how close a found sheet's centre may be to one a paused or
+	// failed portrait still owns before it counts as that same sheet.
+	heldSheetMM = 40.0
+
+	sheetCard    = "card"
+	sheetNameTag = "name_tag"
 )
 
 // Config is the reception-queue service configuration.
@@ -93,6 +100,10 @@ type Config struct {
 	// StateFile is where jobs are saved. Defaults to a file named after the
 	// service in $VIAM_MODULE_DATA.
 	StateFile string `json:"state_file,omitempty"`
+	// PaperFinder, when set, picks a blank sheet off the mat for each job and
+	// sends it with the draw or write, instead of the drawer's and writer's own
+	// fixed surfaces. Without a sheet the job waits for resume.
+	PaperFinder string `json:"paper_finder,omitempty"`
 }
 
 // Validate returns implicit dependencies and any config errors.
@@ -120,11 +131,19 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.NameTagWriter != "" {
 		deps = append(deps, cfg.NameTagWriter)
 	}
+	if cfg.PaperFinder != "" {
+		deps = append(deps, cfg.PaperFinder)
+	}
 	return deps, nil, nil
 }
 
 type commander interface {
 	DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error)
+}
+
+type paperWait struct {
+	since time.Time
+	err   string
 }
 
 // Job is one name tag, text line, or portrait. Portraits carry their strokes, never the photo.
@@ -140,9 +159,13 @@ type Job struct {
 	Total        int                    `json:"polylines_total,omitempty"`
 	NextPolyline int                    `json:"next_polyline,omitempty"`
 	Error        string                 `json:"error,omitempty"`
-	CreatedAt    time.Time              `json:"created_at"`
-	StartedAt    time.Time              `json:"started_at,omitempty"`
-	FinishedAt   time.Time              `json:"finished_at,omitempty"`
+	// Paper is the sheet the paper finder gave this job, kept so a paused
+	// portrait resumes on the same one. SheetAt is that sheet's centre.
+	Paper      map[string]interface{} `json:"paper,omitempty"`
+	SheetAt    *[2]float64            `json:"sheet_at,omitempty"`
+	CreatedAt  time.Time              `json:"created_at"`
+	StartedAt  time.Time              `json:"started_at,omitempty"`
+	FinishedAt time.Time              `json:"finished_at,omitempty"`
 }
 
 type receptionQueue struct {
@@ -159,9 +182,13 @@ type receptionQueue struct {
 	margin         float64
 	stateFile      string
 	paperSwapWait  time.Duration
+	finder         commander
 
 	mu   sync.Mutex
 	jobs []*Job
+	// needsPaper is, per sheet kind, why the last job needing one found none.
+	// Jobs needing that kind wait until resume clears it.
+	needsPaper map[string]*paperWait
 	// wake nudges the worker when a job is queued; preempt asks it to pause the
 	// portrait in progress because a name tag is waiting.
 	wake    chan struct{}
@@ -202,6 +229,13 @@ func newQueue(ctx context.Context, deps resource.Dependencies, conf resource.Con
 		stateFile = filepath.Join(dir, "reception-queue-"+conf.ResourceName().Name+".json")
 	}
 	q := newWithClients(conf.ResourceName(), logger, drawer, gen, writer, cfg, stateFile)
+	if cfg.PaperFinder != "" {
+		if q.finder, err = generic.FromProvider(deps, cfg.PaperFinder); err != nil {
+			return nil, fmt.Errorf("reception-queue: get paper_finder %q: %w", cfg.PaperFinder, err)
+		}
+		// A used sheet is never picked again, so there is nothing to wait out.
+		q.paperSwapWait = 0
+	}
 	if cfg.Photo != "" {
 		if q.photo, err = camera.FromProvider(deps, cfg.Photo); err != nil {
 			return nil, fmt.Errorf("reception-queue: get photo %q: %w", cfg.Photo, err)
@@ -223,6 +257,7 @@ func newWithClients(name resource.Name, logger logging.Logger, drawer, gen, writ
 		margin:         orDefault(cfg.MarginMM, defaultMarginMM),
 		stateFile:      stateFile,
 		paperSwapWait:  paperSwapWait,
+		needsPaper:     map[string]*paperWait{},
 		wake:           make(chan struct{}, 1),
 		preempt:        make(chan struct{}, 1),
 	}
@@ -293,9 +328,11 @@ func (q *receptionQueue) DoCommand(ctx context.Context, cmd map[string]interface
 		return q.cancelJob(ctx, str(args, "job_id"))
 	case "retry_job":
 		return q.retryJob(str(args, "job_id"))
+	case "resume":
+		return q.resume(), nil
 	default:
 		return nil, fmt.Errorf("reception-queue: unknown verb %q; expected \"enqueue_portrait\", \"enqueue_name_tag\", "+
-			"\"enqueue_text\", \"status\", \"job\", \"cancel_job\", or \"retry_job\"", v)
+			"\"enqueue_text\", \"status\", \"job\", \"cancel_job\", \"retry_job\", or \"resume\"", v)
 	}
 }
 
@@ -473,6 +510,10 @@ func (q *receptionQueue) retryJob(id string) (map[string]interface{}, error) {
 	job.State, job.Error = stateQueued, ""
 	if job.NextPolyline > 0 {
 		job.State = statePaused
+	} else {
+		// Only a portrait with strokes on its sheet goes back to it; a card that
+		// failed may be part-written, so it gets a fresh one.
+		job.Paper, job.SheetAt = nil, nil
 	}
 	err := q.saveLocked()
 	q.mu.Unlock()
@@ -538,7 +579,112 @@ func (q *receptionQueue) status() map[string]interface{} {
 			finished = append(finished, summary(j))
 		}
 	}
-	return map[string]interface{}{"active": active, "waiting": waiting, "finished": finished}
+	out := map[string]interface{}{"active": active, "waiting": waiting, "finished": finished}
+	if len(q.needsPaper) > 0 {
+		needs := []interface{}{}
+		for _, kind := range []string{sheetNameTag, sheetCard} {
+			w := q.needsPaper[kind]
+			if w == nil {
+				continue
+			}
+			n := map[string]interface{}{"kind": kind, "since": w.since.UTC().Format(time.RFC3339)}
+			if w.err != "" {
+				n["error"] = w.err
+			}
+			needs = append(needs, n)
+		}
+		out["needs_paper"] = needs
+	}
+	return out
+}
+
+// resume is what a person sends after putting paper down: jobs waiting for a
+// sheet look again.
+func (q *receptionQueue) resume() map[string]interface{} {
+	q.mu.Lock()
+	q.needsPaper = map[string]*paperWait{}
+	q.mu.Unlock()
+	q.nudge(q.wake)
+	// A tag that can now be written should not wait out a portrait.
+	q.nudge(q.preempt)
+	return q.status()
+}
+
+// sheetKind is what a job is drawn on: portraits on cards, the writer's jobs on name tags.
+func sheetKind(j *Job) string {
+	if isCard(j) {
+		return sheetNameTag
+	}
+	return sheetCard
+}
+
+// heldSheetsLocked is where the sheets other jobs still own lie: an unfinished
+// portrait's card may not yet look used, but it is not blank.
+func (q *receptionQueue) heldSheetsLocked(except *Job) [][2]float64 {
+	var out [][2]float64
+	for _, j := range q.jobs {
+		if j == except || j.SheetAt == nil {
+			continue
+		}
+		if j.State == stateQueued || j.State == statePaused || j.State == stateActive ||
+			(j.State == stateFailed && j.NextPolyline > 0) {
+			out = append(out, *j.SheetAt)
+		}
+	}
+	return out
+}
+
+// findSheet asks the paper finder for the nearest blank sheet of kind that no
+// other job owns.
+func (q *receptionQueue) findSheet(ctx context.Context, kind string, held [][2]float64) (map[string]interface{}, [2]float64, error) {
+	resp, err := q.finder.DoCommand(ctx, map[string]interface{}{"find": map[string]interface{}{"kind": kind}})
+	if err != nil {
+		return nil, [2]float64{}, fmt.Errorf("find a %s: %w", kind, err)
+	}
+	sheets, _ := resp["sheets"].([]interface{})
+	for _, raw := range sheets {
+		sheet, _ := raw.(map[string]interface{})
+		paper, _ := sheet["paper"].(map[string]interface{})
+		center, _ := sheet["center"].(map[string]interface{})
+		x, xok := center["x"].(float64)
+		y, yok := center["y"].(float64)
+		if paper == nil || !xok || !yok {
+			continue
+		}
+		owned := false
+		for _, h := range held {
+			if math.Hypot(x-h[0], y-h[1]) < heldSheetMM {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			return paper, [2]float64{x, y}, nil
+		}
+	}
+	return nil, [2]float64{}, nil
+}
+
+// withPaper adds the job's sheet to the writer command's payload.
+func withPaper(cmd, paper map[string]interface{}) map[string]interface{} {
+	if paper == nil {
+		return cmd
+	}
+	out := make(map[string]interface{}, len(cmd))
+	for v, payload := range cmd {
+		args, ok := payload.(map[string]interface{})
+		if !ok {
+			out[v] = payload
+			continue
+		}
+		withSheet := make(map[string]interface{}, len(args)+1)
+		for k, val := range args {
+			withSheet[k] = val
+		}
+		withSheet["paper"] = paper
+		out[v] = withSheet
+	}
+	return out
 }
 
 // orderedLocked is the waiting jobs in the order they will run: card jobs
@@ -587,9 +733,14 @@ func isCard(j *Job) bool {
 	return j.Kind == kindNameTag || j.Kind == kindText
 }
 
+// cardWaitingLocked reports whether a card job could run now. One waiting for
+// a tag sheet cannot, so it must not make a portrait step aside.
 func (q *receptionQueue) cardWaitingLocked() bool {
 	for _, j := range q.jobs {
-		if isCard(j) && j.State == stateQueued {
+		if !isCard(j) || j.State != stateQueued {
+			continue
+		}
+		if !q.needsSheetLocked(j) || q.needsPaper[sheetNameTag] == nil {
 			return true
 		}
 	}
@@ -609,21 +760,21 @@ func (q *receptionQueue) run(ctx context.Context) {
 		q.mu.Lock()
 		var next *Job
 		var swapLeft time.Duration
-		if ordered := q.orderedLocked(); len(ordered) > 0 {
-			next = ordered[0]
+		for _, j := range q.orderedLocked() {
+			if q.needsSheetLocked(j) && q.needsPaper[sheetKind(j)] != nil {
+				continue
+			}
+			next = j
+			break
+		}
+		var held [][2]float64
+		if next != nil {
 			if last, ok := spent[isCard(next)]; ok && last.id != next.ID {
 				swapLeft = time.Until(last.at.Add(q.paperSwapWait))
 			}
-			if swapLeft <= 0 {
-				next.State = stateActive
-				if next.StartedAt.IsZero() {
-					next.StartedAt = time.Now()
-				}
-				if err := q.saveLocked(); err != nil {
-					q.logger.Warnf("reception-queue: %v", err)
-				}
-			}
+			held = q.heldSheetsLocked(next)
 		}
+		needSheet := next != nil && swapLeft <= 0 && q.needsSheetLocked(next)
 		q.mu.Unlock()
 
 		if next == nil || swapLeft > 0 {
@@ -639,6 +790,56 @@ func (q *receptionQueue) run(ctx context.Context) {
 			}
 			continue
 		}
+
+		var paper map[string]interface{}
+		var at [2]float64
+		var findErr error
+		if needSheet {
+			paper, at, findErr = q.findSheet(ctx, sheetKind(next), held)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		q.mu.Lock()
+		// It may have been canceled while the finder looked.
+		if next.State != stateQueued && next.State != statePaused {
+			q.mu.Unlock()
+			continue
+		}
+		// A card that arrived while the finder looked goes first; the portrait
+		// keeps the sheet it was given for when its turn comes.
+		if !isCard(next) && q.cardWaitingLocked() {
+			if paper != nil {
+				next.Paper, next.SheetAt = paper, &at
+			}
+			q.mu.Unlock()
+			continue
+		}
+		if needSheet {
+			if paper == nil {
+				w := &paperWait{since: time.Now()}
+				if findErr != nil {
+					w.err = findErr.Error()
+				}
+				q.needsPaper[sheetKind(next)] = w
+				q.mu.Unlock()
+				q.logger.Infof("reception-queue: no blank %s for %s %s; waiting for resume", sheetKind(next), next.Kind, next.ID)
+				if findErr != nil {
+					q.logger.Warnf("reception-queue: %v", findErr)
+				}
+				continue
+			}
+			next.Paper, next.SheetAt = paper, &at
+		}
+		next.State = stateActive
+		if next.StartedAt.IsZero() {
+			next.StartedAt = time.Now()
+		}
+		if err := q.saveLocked(); err != nil {
+			q.logger.Warnf("reception-queue: %v", err)
+		}
+		q.mu.Unlock()
+
 		if isCard(next) {
 			q.runCard(ctx, next)
 		} else {
@@ -653,6 +854,11 @@ func (q *receptionQueue) run(ctx context.Context) {
 		}
 		q.mu.Unlock()
 	}
+}
+
+// needsSheetLocked reports whether the job still has to be given a sheet.
+func (q *receptionQueue) needsSheetLocked(j *Job) bool {
+	return q.finder != nil && j.Paper == nil
 }
 
 func (q *receptionQueue) finish(job *Job, state string, err error) {
@@ -679,6 +885,7 @@ func (q *receptionQueue) runCard(ctx context.Context, job *Job) {
 	if job.Kind == kindNameTag {
 		cmd = fillName(q.nameTagCommand, job.Name).(map[string]interface{})
 	}
+	cmd = withPaper(cmd, job.Paper)
 	q.logger.Infof("reception-queue: writing %s %s", job.Kind, job.ID)
 	cardCtx, cancel := context.WithCancel(ctx)
 	q.mu.Lock()
@@ -718,11 +925,13 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 		resp map[string]interface{}
 		err  error
 	}
+	draw := map[string]interface{}{"polylines": polylinesArg(job.Polylines), "start_at": start}
+	if job.Paper != nil {
+		draw["paper"] = job.Paper
+	}
 	done := make(chan result, 1)
 	go func() {
-		resp, err := q.drawer.DoCommand(ctx, map[string]interface{}{"draw": map[string]interface{}{
-			"polylines": polylinesArg(job.Polylines), "start_at": start,
-		}})
+		resp, err := q.drawer.DoCommand(ctx, map[string]interface{}{"draw": draw})
 		done <- result{resp, err}
 	}()
 
