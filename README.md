@@ -57,8 +57,18 @@ DoCommand, no image data passing through your hands.
 | `allowed_collisions` | array | no | Frame pairs the planner should not treat as a collision. See [Anything bolted to the arm](#anything-bolted-to-the-arm). |
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
 | `line_tolerance_mm` | number | no | How far a pen-on-paper move may stray from its straight line, up and down included. Default 0.5; a rigid pen needs about 0.05. |
+| `stroke_speed_degs_per_sec`, `stroke_acceleration_degs_per_sec_per_sec` | number | no | Cap the arm while the pen is on the paper or going onto it; travel between strokes runs at the arm's own. A `draw` may carry its own. |
+| `touch_off` | object | no | Find the paper by touching it before each drawing. See [Finding the paper by touch](#finding-the-paper-by-touch). |
+
+Each stroke, from pen-down through its last point to pen-up, is planned and run
+as one motion, so the arm moves through its points without stopping at each.
+Stopping and starting at every point is slower, and with a force sensor on the
+wrist each stop jolts it by more than a pen presses. The travel to the stroke
+and the descent onto the paper stay moves of their own. Each stroke is planned
+through points no more than 1 mm apart: the arm moves between planned points
+by blending joint angles, which bows off a straight line, into the paper and
+off it, by more the further apart the points are.
 | `force_guard` | object | no | Stops a drawing when a sensor reads more force than a bare marker tip should produce. See [A cap left on the marker](#a-cap-left-on-the-marker). |
-| `force_control` | object | no | Draws at a target force rather than a fixed height. See [Drawing at a force instead of a height](#drawing-at-a-force-instead-of-a-height). |
 
 ### Which corner is top-left
 
@@ -178,47 +188,39 @@ logs what the force did over its baseline, and `status` keeps the latest as
 so these are the numbers to set them from: start with both limits generous,
 draw with the cap off, and bring each down to a margin above its `peak`.
 
-### Drawing at a force instead of a height
+### Finding the paper by touch
 
-A pen with no give, held rigidly, has a few tenths of a millimetre between not
-touching and pressing hard: on armfarm07 a felt tip on card goes from first
-contact to about 2.5 N in 0.2 mm, and one card sat 0.5 mm higher at one side
-than the other. No single height draws all of it. `force_control` sets each
-pen-down point's height from the force instead:
+A pen with no give has a few tenths of a millimetre between not touching and
+pressing hard, less than a sheet tilts across its width or the pen shifts in
+its holder. `touch_off` measures where the paper is before each drawing, with
+the arm still, where the wrist sensor is precise:
 
 ```json
-"force_control": { "target_force": 1.0 },
-"line_tolerance_mm": 0.05
+"touch_off": { "force": 0.8, "press_mm": 0.2 }
 ```
+
+At three points spanning what it is about to draw, the pen stops 1 mm above the
+paper's configured height, takes a still reading, and steps down until the force
+reaches `force`: 0.2 mm at a time, then 0.05 mm once it first feels the paper,
+so a stiff surface is not overshot. The height is interpolated between the last
+two steps, since rounding each touch to a step would read as tilt. The drawing
+goes on the plane through the three touches, its pen-down moves `press_mm` below
+it so the pen stays on wherever the sheet dips. A drawing resuming on the same
+sheet keeps its plane.
 
 | Attribute | Type | Required | Description |
 |---|---|---|---|
-| `target_force` | number | no | The force to draw with over the guard's baseline, in the sensor's units. Default 1. Must be below `force_guard.max_force`. |
-| `gain_mm_per_unit` | number | no | How far one unit of force error moves the next point. Default 0.04, under the 0.1 that a 10 N/mm felt tip would overshoot at. |
-| `max_step_mm` | number | no | The most the height changes between two points while the pen touches. Default 0.05. |
-| `search_step_mm` | number | no | How far each point goes down while the pen touches nothing. Default 0.1. |
-| `max_offset_mm` | number | no | How far from the paper's configured height the pen may go. Default 0.6: at 10 N/mm, a wrong surface estimate can't push the pen much past the guard's limit. |
+| `force` | number | no | What counts as touching, over the still reading. Default 1.5. Must be below `force_guard.max_force`. |
+| `press_mm` | number | no | How far below the touched plane the pen draws. Default 0.2; each 0.1 mm is about 1 N with a felt tip on card. A firmer nib is stiffer, so start lower. |
+| `start_above_mm` | number | no | Where each touch starts stepping down, above the configured height. Default 1. |
+| `step_mm`, `fine_step_mm` | number | no | Steps before and after the pen first feels the paper. Default 0.2 and 0.05. |
+| `max_depth_mm` | number | no | How far below the configured height a touch may go before it gives up. Default 1.5. |
 
-It needs `force_guard`, and uses its sensor and its limits, which still stop
-the drawing as before. It adds no moves: the guard already reads the force
-through every move, so each point's height comes from the force the point
-before it ended at. That force is measured from the reading at the end of the
-descent just before, with the pen 2 mm above the paper, not from the draw's
-baseline: a wrist sensor reads differently while the arm moves, on armfarm07 by
-about 1.3 N, more than the force it draws with. A pen too light goes down by up
-to `max_step_mm`, one too heavy comes up, and one touching nothing goes down by
-`search_step_mm`.
-
-Points drawn near the target teach a plane of where the paper is, which the
-next pen-down starts from. Each drawing learns its own: a plane from a name tag
-says little about a card across the mat. It stays level until its points spread
-30 mm both ways, since over a small patch noise reads as a steep slope, and its
-tilt is capped at 0.6 mm per 100 mm. `status` shows it in `last_force.surface`.
-
-What it cannot correct is a move that strays off its line between two points,
-so set `line_tolerance_mm` well under the working depth; the default, 0.5 mm,
-is right for a sprung pen. A lower `lift_off_z_mm` saves travel time between
-strokes, and a rigid pen needs no more than a few millimetres.
+It needs `force_guard`. Every move down is guarded as in a drawing, so a capped
+pen meets the paper on its way to the start of a touch and trips there; the lift
+after each touch is not, since moving away can only ease the force. A touch that
+feels nothing, or a plane steeper than 1 mm per 100 mm, fails the drawing. The
+log reports each touch and the plane's slope.
 
 ### The rest pose
 
@@ -588,6 +590,7 @@ tray say, and the writer carries its corners into every draw.
 | `outline` | bool | no | Trace TTF outlines from `font` instead of a stroke font. A TTF describes the boundary of each letter, so this draws hollow letters, at three times the points. |
 | `font` | string | no | TTF family for `outline`. Default tries Helvetica, then its metric-compatible clones. |
 | `spacing_mm` | number | no | Spacing of the points along each stroke. Default `2`. |
+| `stroke_speed_degs_per_sec`, `stroke_acceleration_degs_per_sec_per_sec` | number | no | Sent with each write's draw, in place of the drawer's: lettering wants slower, steadier strokes than a portrait. |
 
 One drawer serves both surfaces. The queue pauses a portrait before a tag is
 written, the writer draws on the card through the same drawer, and the drawer

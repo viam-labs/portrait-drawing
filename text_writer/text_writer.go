@@ -64,6 +64,11 @@ type Config struct {
 	// Join keeps the pen down between the letters of a script face. Nil means on.
 	Join      *bool   `json:"join,omitempty"`
 	SpacingMM float64 `json:"spacing_mm,omitempty"`
+	// StrokeSpeedDegsPerSec and StrokeAccelerationDegsPerSecPerSec cap the arm
+	// while it writes, in place of the drawer's own: lettering wants slower,
+	// steadier strokes than a portrait.
+	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
+	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
 }
 
 const defaultFill = 0.8
@@ -87,6 +92,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.SpacingMM < 0 {
 		return nil, nil, fmt.Errorf("spacing_mm must be >= 0, got %g", cfg.SpacingMM)
+	}
+	if cfg.StrokeSpeedDegsPerSec < 0 || cfg.StrokeAccelerationDegsPerSecPerSec < 0 {
+		return nil, nil, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
 	}
 	if cfg.Outline && cfg.StrokeFont != "" {
 		return nil, nil, errors.New("outline and stroke_font are exclusive")
@@ -322,9 +330,14 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
 	w.logger.Infof("text-writer: writing %q, %d strokes", a.Text, len(polylines))
-	resp, err := w.drawer.DoCommand(ctx, map[string]interface{}{
-		"draw": map[string]interface{}{"polylines": polylines, "paper": paper},
-	})
+	draw := map[string]interface{}{"polylines": polylines, "paper": paper}
+	if w.cfg.StrokeSpeedDegsPerSec > 0 {
+		draw["stroke_speed_degs_per_sec"] = w.cfg.StrokeSpeedDegsPerSec
+	}
+	if w.cfg.StrokeAccelerationDegsPerSecPerSec > 0 {
+		draw["stroke_acceleration_degs_per_sec_per_sec"] = w.cfg.StrokeAccelerationDegsPerSecPerSec
+	}
+	resp, err := w.drawer.DoCommand(ctx, map[string]interface{}{"draw": draw})
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: draw %q: %w", a.Text, err)
 	}

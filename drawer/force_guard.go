@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
@@ -182,22 +183,6 @@ type forceRun struct {
 	// frozen sensor stays frozen from one move to the next.
 	last    float64
 	repeats int
-	// tail is the latest move's last few raw readings, which force control
-	// steers by.
-	tail    []float64
-	control *forceController
-}
-
-// endRaw is the raw reading the latest move ended at, if it read any.
-func (r *forceRun) endRaw() (float64, bool) {
-	if len(r.tail) == 0 {
-		return 0, false
-	}
-	var sum float64
-	for _, f := range r.tail {
-		sum += f
-	}
-	return sum / float64(len(r.tail)), true
 }
 
 func (r *forceRun) noteRaw(raw float64) {
@@ -207,10 +192,6 @@ func (r *forceRun) noteRaw(raw float64) {
 		r.repeats = 1
 	}
 	r.last = raw
-	r.tail = append(r.tail, raw)
-	if len(r.tail) > forceTailSamples {
-		r.tail = r.tail[1:]
-	}
 }
 
 func (r *forceRun) record(clear bool, force float64) {
@@ -226,9 +207,6 @@ func (r *forceRun) summary() map[string]interface{} {
 		"baseline": r.baseline,
 		"pen_down": r.penDown.summary(),
 		"lifted":   r.lifted.summary(),
-	}
-	if r.control != nil {
-		out["surface"] = r.control.summary()
 	}
 	return out
 }
@@ -247,10 +225,6 @@ func (d *drawer) finishForceRun(run *forceRun) {
 		d.forceGuard.reading, run.baseline,
 		run.penDown.mean(), run.penDown.peak, run.penDown.samples,
 		run.lifted.mean(), run.lifted.peak, run.lifted.samples)
-	if c := run.control; c != nil && c.model.fitted {
-		d.logger.Infof("drawer: force control surface from %d points: z %.2f at (%.0f, %.0f), %+.2f mm/100mm in x, %+.2f in y; offset %+.2f mm",
-			len(c.model.pts), c.model.a, c.model.mx, c.model.my, 100*c.model.b, 100*c.model.c, c.off)
-	}
 }
 
 type excessForceError struct {
@@ -279,13 +253,15 @@ func (e *excessForceError) Error() string {
 		e.force, e.limit, where)
 }
 
-// guardedMove is planAndExecute with the force watched for the whole move. clear
-// marks a move that stays above the paper, held to the lower contact limit.
+// guardedMove is planAndExecuteThrough with the force watched for the whole
+// move. clear marks a move that stays above the paper, held to the lower
+// contact limit.
 func (d *drawer) guardedMove(
-	ctx context.Context, fs *referenceframe.FrameSystem, target spatialmath.Pose, run *forceRun, linear, clear bool,
+	ctx context.Context, fs *referenceframe.FrameSystem, targets []spatialmath.Pose, run *forceRun, linear, clear bool,
+	options *arm.MoveOptions,
 ) error {
 	return d.watchForce(ctx, run, clear, func(moveCtx context.Context) error {
-		return d.planAndExecute(moveCtx, fs, target, d.constraints(linear))
+		return d.planAndExecuteThrough(moveCtx, fs, targets, d.constraints(linear), options)
 	})
 }
 
@@ -296,7 +272,6 @@ func (d *drawer) watchForce(ctx context.Context, run *forceRun, clear bool, move
 		return move(ctx)
 	}
 	limit := d.forceGuard.limit(clear)
-	run.tail = run.tail[:0]
 	moveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tripped := make(chan error, 1)

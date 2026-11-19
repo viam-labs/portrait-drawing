@@ -3,6 +3,7 @@ package drawer
 import (
 	"context"
 	"errors"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -309,4 +310,97 @@ func TestPark_goesToTheRetreatPose(t *testing.T) {
 	d.cfg = &Config{ForceGuard: &ForceGuardConfig{RetreatPose: "mat-view"}}
 	test.That(t, d.park(context.Background(), nil), test.ShouldBeNil)
 	test.That(t, pos.positions, test.ShouldResemble, []uint32{retreatPosition})
+}
+
+func TestStrokeMoves_runsEachStrokeAsOneMove(t *testing.T) {
+	polylines := []Polyline{{{0, 0}, {10, 5}, {20, 5}}, {{30, 0}, {40, 0}}}
+	moves := strokeMoves(drawWaypoints(polylines, 0, r3.Vector{Z: 50}, r3.Vector{X: 1}, 54, 50, 52))
+	var labels []string
+	for _, mv := range moves {
+		labels = append(labels, mv.label)
+	}
+	test.That(t, labels, test.ShouldResemble, []string{
+		"polyline 0 approach", "polyline 0 descent", "polyline 0 stroke",
+		"polyline 1 approach", "polyline 1 descent", "polyline 1 stroke",
+	})
+	stroke := moves[2]
+	// pen-down through two more points, spaced 1 mm apart, then pen-up
+	last := len(stroke.points) - 1
+	test.That(t, stroke.points[0], test.ShouldResemble, r3.Vector{X: 0, Y: 0, Z: 50})
+	test.That(t, stroke.points[last-1], test.ShouldResemble, r3.Vector{X: 20, Y: -5, Z: 50})
+	test.That(t, stroke.points[last].Z, test.ShouldEqual, 54.0)
+	for k := 1; k < last; k++ {
+		test.That(t, stroke.points[k].Distance(stroke.points[k-1]), test.ShouldBeLessThanOrEqualTo, 1.0+1e-9)
+	}
+	test.That(t, stroke.linear, test.ShouldBeTrue)
+	test.That(t, stroke.clear, test.ShouldBeFalse)
+	test.That(t, stroke.endsPolyline, test.ShouldBeTrue)
+	// The descent keeps its own move, so the guard holds it to the contact limit.
+	test.That(t, moves[1].clear, test.ShouldBeTrue)
+	test.That(t, len(moves[1].points), test.ShouldEqual, 1)
+}
+
+func TestStrokeMoves_aOnePointStrokeStillLiftsInTheSameMove(t *testing.T) {
+	moves := strokeMoves(drawWaypoints([]Polyline{{{5, 5}}}, 0, r3.Vector{Z: 50}, r3.Vector{X: 1}, 54, 50, 52))
+	test.That(t, len(moves), test.ShouldEqual, 3)
+	test.That(t, len(moves[2].points), test.ShouldEqual, 2)
+	test.That(t, moves[2].endsPolyline, test.ShouldBeTrue)
+}
+
+func TestDrawWaypoints_marksTheMovesThatEndOnThePaper(t *testing.T) {
+	wps := drawWaypoints([]Polyline{{{0, 0}, {10, 5}, {20, 5}}}, 0, r3.Vector{Z: 50}, r3.Vector{X: 1}, 55, 50, 52)
+	var contact []string
+	for _, wp := range wps {
+		if wp.contact {
+			contact = append(contact, wp.label)
+		}
+	}
+	test.That(t, contact, test.ShouldResemble, []string{"polyline 0 pen-down", "polyline 0 point 1", "polyline 0 point 2"})
+}
+
+func TestConfigValidate_rejectsRemovedForceControl(t *testing.T) {
+	cfg := guardedConfig(validGuard())
+	cfg.RemovedForceControl = []byte(`{"target_force": 1}`)
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "force_control was removed")
+}
+
+func TestConfigValidate_lineTolerance(t *testing.T) {
+	cfg := guardedConfig(validGuard())
+	cfg.LineToleranceMM = -0.1
+	_, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "line_tolerance_mm")
+}
+
+func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T) {
+	limits, err := parseStrokeLimits(map[string]interface{}{"polylines": []interface{}{}, "stroke_speed_degs_per_sec": 15.0})
+	test.That(t, err, test.ShouldBeNil)
+	got := limits.or(strokeLimits{speed: 30, acceleration: 120})
+	test.That(t, got, test.ShouldResemble, strokeLimits{speed: 15, acceleration: 120})
+	opts := got.moveOptions()
+	test.That(t, opts.MaxVelRads, test.ShouldAlmostEqual, 15*math.Pi/180)
+	test.That(t, opts.MaxAccRads, test.ShouldAlmostEqual, 120*math.Pi/180)
+	test.That(t, strokeLimits{}.moveOptions(), test.ShouldBeNil)
+
+	_, err = parseStrokeLimits(map[string]interface{}{"stroke_speed_degs_per_sec": -1.0})
+	test.That(t, err, test.ShouldNotBeNil)
+}
+
+func TestStrokeMoves_spacesALongSegmentAMillimetreApart(t *testing.T) {
+	moves := strokeMoves(drawWaypoints([]Polyline{{{0, 0}, {10, 0}}}, 0, r3.Vector{Z: 50}, r3.Vector{X: 1}, 54, 50, 52))
+	stroke := moves[2].points
+	// pen-down, 9 between, the far end, pen-up
+	test.That(t, len(stroke), test.ShouldEqual, 12)
+	for k := 1; k <= 10; k++ {
+		test.That(t, stroke[k].Distance(stroke[k-1]), test.ShouldAlmostEqual, 1.0)
+		test.That(t, stroke[k].Z, test.ShouldEqual, 50.0)
+	}
+	test.That(t, stroke[11].Z, test.ShouldEqual, 54.0)
+}
+
+func TestAlong_shortSegmentsGetNothingAdded(t *testing.T) {
+	test.That(t, along(r3.Vector{}, r3.Vector{X: 0.8}, 1), test.ShouldBeEmpty)
+	test.That(t, len(along(r3.Vector{}, r3.Vector{X: 2.5}, 1)), test.ShouldEqual, 2)
 }

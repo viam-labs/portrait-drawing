@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,7 +81,15 @@ type Config struct {
 	PreviewCamera      string                                     `json:"preview_camera,omitempty"`
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 	ForceGuard         *ForceGuardConfig                          `json:"force_guard,omitempty"`
-	ForceControl       *ForceControlConfig                        `json:"force_control,omitempty"`
+	TouchOff           *TouchOffConfig                            `json:"touch_off,omitempty"`
+	// StrokeSpeedDegsPerSec and StrokeAccelerationDegsPerSecPerSec cap the arm
+	// while the pen is on the paper or going onto it; travel between strokes
+	// runs at the arm's own. A draw may carry its own. 0 leaves the arm's.
+	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
+	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
+	// RemovedForceControl is read only so Validate can reject it: drawing at a
+	// force by correcting between points could not see past the arm's own jolts.
+	RemovedForceControl json.RawMessage `json:"force_control,omitempty"`
 	// LineToleranceMM is how far a pen-on-paper move may stray from its straight
 	// line, up and down included. A pen with no give needs it well under the
 	// depth its force builds over, a few tenths of a millimetre.
@@ -141,6 +150,28 @@ func (p *Paper) Validate(path, prefix string) error {
 type surface struct {
 	corner spatialmath.Pose
 	across r3.Vector
+	// stroke caps the arm on the paper, in degrees; held with the surface so a
+	// drawing resumes at the speed it started at.
+	stroke strokeLimits
+}
+
+type strokeLimits struct{ speed, acceleration float64 }
+
+func (l strokeLimits) or(fallback strokeLimits) strokeLimits {
+	if l.speed == 0 {
+		l.speed = fallback.speed
+	}
+	if l.acceleration == 0 {
+		l.acceleration = fallback.acceleration
+	}
+	return l
+}
+
+func (l strokeLimits) moveOptions() *arm.MoveOptions {
+	if l.speed == 0 && l.acceleration == 0 {
+		return nil
+	}
+	return &arm.MoveOptions{MaxVelRads: l.speed * math.Pi / 180, MaxAccRads: l.acceleration * math.Pi / 180}
 }
 
 // CheckTopEdge warns when the taught top edge disagrees with width_mm. Services
@@ -221,8 +252,14 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.LineToleranceMM < 0 {
 		return nil, nil, fmt.Errorf("line_tolerance_mm must be >= 0 (0 uses the default), got %g", cfg.LineToleranceMM)
 	}
-	if cfg.ForceControl != nil {
-		if err := cfg.ForceControl.validate(cfg.ForceGuard); err != nil {
+	if len(cfg.RemovedForceControl) > 0 {
+		return nil, nil, errors.New("force_control was removed; remove it from the drawer's config, and see touch_off")
+	}
+	if cfg.StrokeSpeedDegsPerSec < 0 || cfg.StrokeAccelerationDegsPerSecPerSec < 0 {
+		return nil, nil, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
+	}
+	if cfg.TouchOff != nil {
+		if err := cfg.TouchOff.validate(cfg.ForceGuard); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -271,6 +308,9 @@ type drawer struct {
 
 	// lastForce is what the force guard measured over the most recent draw.
 	lastForce *forceRun
+	// touched is the paper the last touch-off measured, kept so a drawing that
+	// resumes on the same sheet does not touch it off again.
+	touched *touchedPaper
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -424,6 +464,7 @@ func newDrawer(
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
+	paper.stroke = strokeLimits{speed: cfg.StrokeSpeedDegsPerSec, acceleration: cfg.StrokeAccelerationDegsPerSecPerSec}
 	var homePose spatialmath.Pose
 	if cfg.HomePose != nil {
 		homeOrientation, homeErr := cfg.HomePose.Orientation.ParseConfig()
@@ -496,6 +537,29 @@ type drawArgs struct {
 	StartAt int `json:"start_at,omitempty"`
 	// Paper, when set, is drawn on instead of the configured one.
 	Paper *Paper `json:"paper,omitempty"`
+	// StrokeSpeedDegsPerSec and StrokeAccelerationDegsPerSecPerSec override the
+	// configured caps for this drawing.
+	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
+	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
+}
+
+func (d *drawer) configuredStroke() strokeLimits {
+	return strokeLimits{speed: d.cfg.StrokeSpeedDegsPerSec, acceleration: d.cfg.StrokeAccelerationDegsPerSecPerSec}
+}
+
+func parseStrokeLimits(payload interface{}) (strokeLimits, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return strokeLimits{}, fmt.Errorf("marshal payload: %w", err)
+	}
+	var args drawArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return strokeLimits{}, fmt.Errorf("parse payload: %w", err)
+	}
+	if args.StrokeSpeedDegsPerSec < 0 || args.StrokeAccelerationDegsPerSecPerSec < 0 {
+		return strokeLimits{}, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
+	}
+	return strokeLimits{speed: args.StrokeSpeedDegsPerSec, acceleration: args.StrokeAccelerationDegsPerSecPerSec}, nil
 }
 
 func parseDrawPayload(payload interface{}) ([]Polyline, int, *Paper, error) {
@@ -985,6 +1049,11 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 			return nil, fmt.Errorf("drawer: %w", err)
 		}
 	}
+	limits, err := parseStrokeLimits(payload)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	paper.stroke = limits.or(d.configuredStroke())
 	ctx, release, err := d.acquireDrawSlot(parent)
 	if err != nil {
 		return nil, err
@@ -1043,6 +1112,65 @@ type waypoint struct {
 	contact      bool
 	endsPolyline bool
 	label        string
+}
+
+// drawMove is one planned, uninterrupted motion through one or more points.
+type drawMove struct {
+	points       []r3.Vector
+	linear       bool
+	clear        bool
+	endsPolyline bool
+	label        string
+}
+
+// maxStrokeStepMM spaces the points a stroke is planned through. The arm moves
+// between planned points by blending joint angles, which bows off a straight
+// line by more the further apart they are, down into the paper included: on
+// armfarm07, portrait strokes with points tens of millimetres apart pressed a
+// rigid pen at 12 N where 2 mm apart lettering stayed near 7.
+const maxStrokeStepMM = 1.0
+
+// strokeMoves runs each stroke, from pen-down through its last point to
+// pen-up, as one move: moving point to point, the arm stops and starts at every
+// one, which is slow and jolts a wrist force sensor by more than a pen presses.
+// Travel and the descent to the paper stay moves of their own, so the guard
+// still checks the descent against its lower limit.
+func strokeMoves(wps []waypoint) []drawMove {
+	var out []drawMove
+	for i := 0; i < len(wps); i++ {
+		wp := wps[i]
+		mv := drawMove{
+			points: []r3.Vector{{X: wp.x, Y: wp.y, Z: wp.z}},
+			linear: wp.linear, clear: wp.clear, endsPolyline: wp.endsPolyline, label: wp.label,
+		}
+		if wp.contact {
+			mv.label = strings.TrimSuffix(wp.label, " pen-down") + " stroke"
+			for i+1 < len(wps) && (wps[i+1].contact || wps[i+1].endsPolyline) {
+				i++
+				next := r3.Vector{X: wps[i].x, Y: wps[i].y, Z: wps[i].z}
+				if wps[i].contact {
+					mv.points = append(mv.points, along(mv.points[len(mv.points)-1], next, maxStrokeStepMM)...)
+				}
+				mv.points = append(mv.points, next)
+				if wps[i].endsPolyline {
+					mv.endsPolyline = true
+					break
+				}
+			}
+		}
+		out = append(out, mv)
+	}
+	return out
+}
+
+// along is the points strictly between from and to, no more than step apart.
+func along(from, to r3.Vector, step float64) []r3.Vector {
+	n := int(math.Ceil(from.Distance(to) / step))
+	out := make([]r3.Vector, 0, max(n-1, 0))
+	for k := 1; k < n; k++ {
+		out = append(out, from.Add(to.Sub(from).Mul(float64(k)/float64(n))))
+	}
+	return out
 }
 
 func topEdgeLength(left, right r3.Vector) float64 {
@@ -1119,11 +1247,6 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 
 	waypoints := drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear)
 	run := &forceRun{}
-	var control *forceController
-	if d.cfg.ForceControl != nil && d.forceGuard != nil {
-		control = newForceController(d.cfg.ForceControl.withDefaults(), newSurfaceModel(zDown), zDown)
-		run.control = control
-	}
 	defer d.finishForceRun(run)
 	if len(waypoints) > 0 {
 		above := spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
@@ -1139,17 +1262,39 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		}
 	}
 
-	for _, wp := range waypoints {
+	if d.cfg.TouchOff != nil && d.forceGuard != nil && len(waypoints) > 0 {
+		plane, err := d.paperPlane(ctx, fs, run, polylines, startAt, paper, zDown, zUp)
+		if err != nil {
+			wrapped := fmt.Errorf("drawer: %w", err)
+			if guardStopped(err) && ctx.Err() == nil {
+				if retreatErr := d.retreat(ctx, fs, zUp, orientation); retreatErr != nil {
+					d.logger.Warnf("drawer: retreat after the force guard stopped a touch-off: %v", retreatErr)
+				}
+			}
+			if ctx.Err() != nil {
+				d.setPhase(phaseCanceled)
+			} else {
+				d.setFailed(wrapped)
+			}
+			return nil, wrapped
+		}
+		onPlane(waypoints, plane, zDown, d.cfg.TouchOff.withDefaults().pressMM())
+	}
+
+	for _, mv := range strokeMoves(waypoints) {
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
-		z := wp.z
-		if control != nil && wp.contact {
-			z = control.height(wp.x, wp.y)
+		targets := make([]spatialmath.Pose, len(mv.points))
+		for i, p := range mv.points {
+			targets[i] = spatialmath.NewPose(p, orientation)
 		}
-		target := spatialmath.NewPose(r3.Vector{X: wp.x, Y: wp.y, Z: z}, orientation)
-		if err := d.guardedMove(ctx, fs, target, run, wp.linear, wp.clear); err != nil {
-			wrapped := fmt.Errorf("drawer: %s: %w", wp.label, err)
+		var options *arm.MoveOptions
+		if mv.linear {
+			options = paper.stroke.moveOptions()
+		}
+		if err := d.guardedMove(ctx, fs, targets, run, mv.linear, mv.clear, options); err != nil {
+			wrapped := fmt.Errorf("drawer: %s: %w", mv.label, err)
 			if ctx.Err() != nil {
 				d.setPhase(phaseCanceled)
 				return nil, wrapped
@@ -1166,17 +1311,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 			}
 			return nil, wrapped
 		}
-		if control != nil {
-			if raw, ok := run.endRaw(); ok {
-				switch {
-				case wp.contact:
-					control.observe(wp.x, wp.y, z, control.contactForce(raw, run.baseline))
-				case wp.clear:
-					control.noteAir(raw)
-				}
-			}
-		}
-		if !wp.endsPolyline {
+		if !mv.endsPolyline {
 			continue
 		}
 		drawn++
@@ -1236,6 +1371,16 @@ func (d *drawer) buildFrameSystem(ctx context.Context) (*referenceframe.FrameSys
 }
 
 func (d *drawer) planAndExecute(ctx context.Context, fs *referenceframe.FrameSystem, target spatialmath.Pose, constraints *motionplan.Constraints) error {
+	return d.planAndExecuteThrough(ctx, fs, []spatialmath.Pose{target}, constraints, nil)
+}
+
+// planAndExecuteThrough plans one motion through every target in turn and runs
+// it as a single trajectory, so the arm keeps moving from one to the next
+// instead of stopping at each.
+func (d *drawer) planAndExecuteThrough(
+	ctx context.Context, fs *referenceframe.FrameSystem, targets []spatialmath.Pose,
+	constraints *motionplan.Constraints, options *arm.MoveOptions,
+) error {
 	armName := d.arm.Name().Name
 	currentInputs, err := d.arm.JointPositions(ctx, nil)
 	if err != nil {
@@ -1244,13 +1389,16 @@ func (d *drawer) planAndExecute(ctx context.Context, fs *referenceframe.FrameSys
 	startState := armplanning.NewPlanState(nil, referenceframe.FrameSystemInputs{
 		armName: currentInputs,
 	})
-	goalState := armplanning.NewPlanState(referenceframe.FrameSystemPoses{
-		armName: referenceframe.NewPoseInFrame(referenceframe.World, target),
-	}, nil)
+	goals := make([]*armplanning.PlanState, len(targets))
+	for i, target := range targets {
+		goals[i] = armplanning.NewPlanState(referenceframe.FrameSystemPoses{
+			armName: referenceframe.NewPoseInFrame(referenceframe.World, target),
+		}, nil)
+	}
 	plan, _, err := armplanning.PlanMotion(ctx, d.logger, &armplanning.PlanRequest{
 		FrameSystem: fs,
 		StartState:  startState,
-		Goals:       []*armplanning.PlanState{goalState},
+		Goals:       goals,
 		Constraints: constraints,
 	})
 	if err != nil {
@@ -1264,7 +1412,7 @@ func (d *drawer) planAndExecute(ctx context.Context, fs *referenceframe.FrameSys
 		}
 		trajectory = append(trajectory, armInputs)
 	}
-	if err := d.arm.MoveThroughJointPositions(ctx, trajectory, nil, nil); err != nil {
+	if err := d.arm.MoveThroughJointPositions(ctx, trajectory, options, nil); err != nil {
 		return fmt.Errorf("execute trajectory: %w", err)
 	}
 	return nil
