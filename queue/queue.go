@@ -64,6 +64,9 @@ const (
 	progressPoll = 2 * time.Second
 	// keepFinished bounds how many finished jobs stay in the saved state.
 	keepFinished = 50
+	// paperSwapWait gives the operator time to swap in a fresh sheet before
+	// another job is drawn on the same surface.
+	paperSwapWait = 8 * time.Second
 )
 
 // Config is the reception-queue service configuration.
@@ -155,6 +158,7 @@ type receptionQueue struct {
 	paperW, paperH float64
 	margin         float64
 	stateFile      string
+	paperSwapWait  time.Duration
 
 	mu   sync.Mutex
 	jobs []*Job
@@ -218,6 +222,7 @@ func newWithClients(name resource.Name, logger logging.Logger, drawer, gen, writ
 		paperH:         orDefault(cfg.PaperHeightMM, defaultPaperHeightMM),
 		margin:         orDefault(cfg.MarginMM, defaultMarginMM),
 		stateFile:      stateFile,
+		paperSwapWait:  paperSwapWait,
 		wake:           make(chan struct{}, 1),
 		preempt:        make(chan struct{}, 1),
 	}
@@ -592,28 +597,47 @@ func (q *receptionQueue) cardWaitingLocked() bool {
 }
 
 func (q *receptionQueue) run(ctx context.Context) {
+	// spent is, per surface (card or portrait paper), the last job whose sheet
+	// it left marked: done, failed, or canceled mid-draw. Only a paused portrait
+	// keeps its sheet, and a retry of the spent job itself goes back onto it.
+	type spentSheet struct {
+		id string
+		at time.Time
+	}
+	spent := map[bool]spentSheet{}
 	for {
 		q.mu.Lock()
 		var next *Job
+		var swapLeft time.Duration
 		if ordered := q.orderedLocked(); len(ordered) > 0 {
 			next = ordered[0]
-			next.State = stateActive
-			if next.StartedAt.IsZero() {
-				next.StartedAt = time.Now()
+			if last, ok := spent[isCard(next)]; ok && last.id != next.ID {
+				swapLeft = time.Until(last.at.Add(q.paperSwapWait))
 			}
-			if err := q.saveLocked(); err != nil {
-				q.logger.Warnf("reception-queue: %v", err)
+			if swapLeft <= 0 {
+				next.State = stateActive
+				if next.StartedAt.IsZero() {
+					next.StartedAt = time.Now()
+				}
+				if err := q.saveLocked(); err != nil {
+					q.logger.Warnf("reception-queue: %v", err)
+				}
 			}
 		}
 		q.mu.Unlock()
 
-		if next == nil {
+		if next == nil || swapLeft > 0 {
+			var swapped <-chan time.Time
+			if swapLeft > 0 {
+				swapped = time.After(swapLeft)
+			}
 			select {
 			case <-ctx.Done():
 				return
 			case <-q.wake:
-				continue
+			case <-swapped:
 			}
+			continue
 		}
 		if isCard(next) {
 			q.runCard(ctx, next)
@@ -623,6 +647,11 @@ func (q *receptionQueue) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		q.mu.Lock()
+		if next.State != statePaused {
+			spent[isCard(next)] = spentSheet{id: next.ID, at: time.Now()}
+		}
+		q.mu.Unlock()
 	}
 }
 

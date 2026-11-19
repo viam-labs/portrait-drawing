@@ -185,6 +185,7 @@ func newHarness(t *testing.T) *harness {
 		state:  filepath.Join(t.TempDir(), "queue.json"),
 	}
 	h.q = newWithClients(generic.Named("queue"), logging.NewTestLogger(t), h.drawer, h.gen, h.writer, &Config{}, h.state)
+	h.q.paperSwapWait = 0
 	t.Cleanup(func() { _ = h.q.Close(context.Background()) })
 	return h
 }
@@ -317,6 +318,8 @@ func TestTextJobIsWrittenWithItsOwnSizingBeforePortraits(t *testing.T) {
 
 func TestNameTagPausesThePortraitThenItResumesWhereItStopped(t *testing.T) {
 	h := newHarness(t)
+	// A paused portrait keeps its sheet, so it resumes with no swap after the tag.
+	h.q.paperSwapWait = time.Hour
 	h.q.start()
 	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
 	h.waitDrawing(t)
@@ -586,4 +589,91 @@ func restartFailsAnInterruptedCard(t *testing.T, job *Job) {
 		t.Fatalf("rewrote %q on the partly written card", name)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+func TestCardsInARowWaitForTheCardSwap(t *testing.T) {
+	h := newHarness(t)
+	h.q.paperSwapWait = 300 * time.Millisecond
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_text", map[string]interface{}{"text": "Welcome"})
+	h.q.start()
+
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	start := time.Now()
+	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"status": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, time.Since(start), test.ShouldBeLessThan, 100*time.Millisecond)
+	select {
+	case text := <-h.writer.wrote:
+		test.That(t, text, test.ShouldEqual, "Welcome")
+		test.That(t, time.Since(start), test.ShouldBeGreaterThanOrEqualTo, 250*time.Millisecond)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second card was never written")
+	}
+}
+
+func TestAPortraitAfterACardDoesNotWait(t *testing.T) {
+	h := newHarness(t)
+	h.q.paperSwapWait = time.Hour
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.q.start()
+
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.waitDrawing(t)
+}
+
+func TestPortraitPaperIsSwappedEvenWithACardInBetween(t *testing.T) {
+	h := newHarness(t)
+	h.q.paperSwapWait = time.Hour
+	h.q.start()
+	first := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.drawUntil(t, first, stateDone)
+
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	second := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "y"})
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	time.Sleep(200 * time.Millisecond)
+
+	s, err := h.q.jobSummary(second)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, len(h.drawer.starts), test.ShouldEqual, 1)
+}
+
+func TestACanceledCardIsSwappedAndCloseSkipsTheWait(t *testing.T) {
+	h := newHarness(t)
+	h.q.paperSwapWait = time.Hour
+	h.writer.block = true
+	h.q.start()
+	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	<-h.writer.wrote
+	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"cancel_job": map[string]interface{}{"job_id": id}})
+	test.That(t, err, test.ShouldBeNil)
+
+	h.writer.mu.Lock()
+	h.writer.block = false
+	h.writer.mu.Unlock()
+	next := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	select {
+	case name := <-h.writer.wrote:
+		t.Fatalf("%s was written on the half-written card", name)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		_ = h.q.Close(context.Background())
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked on the paper swap")
+	}
+	s, err := h.q.jobSummary(next)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
 }

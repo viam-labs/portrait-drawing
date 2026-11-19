@@ -547,6 +547,12 @@ just do one job when asked.
   portrait. If a portrait is drawing when one arrives, the queue `pause`s the
   drawer — the stroke in progress finishes and the arm returns to rest — writes
   the card, and then resumes the portrait from the next stroke.
+- **8 seconds to swap the sheet.** After a job leaves its card or portrait
+  paper marked — done, failed, or canceled mid-draw — the next job on that same
+  surface waits 8 s from then so the sheet can be replaced. A job on the other
+  surface does not wait, so a card can be written while the portrait paper is
+  swapped. A paused portrait keeps its sheet, and so does a failed portrait
+  retried straight away. The wait is not kept across a restart.
 - **The name-tag writer must block until it is done.** The queue treats the
   writer's DoCommand returning as "the tag is finished and the pen is up", and
   resumes the portrait straight after.
