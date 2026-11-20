@@ -21,7 +21,9 @@ const (
 	// baselineHeightMM is above the paper by more than a marker cap adds, so a
 	// capped pen is still in the air when the baseline is taken.
 	baselineHeightMM = 40.0
-	faultExcessForce = "excess_force"
+	// excess_force predates pressing_too_hard and means the cap case only.
+	faultExcessForce  = "excess_force"
+	faultPressingHard = "pressing_too_hard"
 	// frozenPolls is how many polls in a row may read exactly the same before the
 	// sensor counts as frozen: about half a second, far longer than a live
 	// sensor's noise ever holds still.
@@ -391,8 +393,11 @@ func guardStopped(err error) bool {
 
 func faultOf(err error) string {
 	var excess *excessForceError
-	if errors.As(err, &excess) {
+	if !errors.As(err, &excess) {
+		return ""
+	}
+	if excess.clear {
 		return faultExcessForce
 	}
-	return ""
+	return faultPressingHard
 }

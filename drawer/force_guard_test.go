@@ -117,7 +117,7 @@ func TestWatchForce_normalForceLetsTheMoveFinish(t *testing.T) {
 func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
-	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
+	test.That(t, faultOf(err), test.ShouldEqual, faultPressingHard)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "pressing too hard")
 	test.That(t, stops.Load(), test.ShouldEqual, 1)
 }
@@ -137,7 +137,7 @@ func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 
 	err = d.watchForce(context.Background(), &forceRun{baseline: -12.0}, false, untilCanceled)
-	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
+	test.That(t, faultOf(err), test.ShouldEqual, faultPressingHard)
 }
 
 func TestForceRun_keepsLiftedAndPenDownApart(t *testing.T) {
@@ -269,14 +269,19 @@ func TestWatchForce_withoutAGuardJustMoves(t *testing.T) {
 }
 
 func TestStatus_excessForceIsAFaultUntilDrawingRestarts(t *testing.T) {
-	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
-	d.setFailed(&excessForceError{force: 7, limit: 5})
-	s := d.status()
-	test.That(t, s["state"], test.ShouldEqual, phaseFailed)
-	test.That(t, s["fault"], test.ShouldEqual, faultExcessForce)
-	d.startDrawing(10, 100)
-	_, hasFault := d.status()["fault"]
-	test.That(t, hasFault, test.ShouldBeFalse)
+	for _, tc := range []struct {
+		clear bool
+		fault string
+	}{{true, faultExcessForce}, {false, faultPressingHard}} {
+		d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+		d.setFailed(&excessForceError{force: 7, limit: 5, clear: tc.clear})
+		s := d.status()
+		test.That(t, s["state"], test.ShouldEqual, phaseFailed)
+		test.That(t, s["fault"], test.ShouldEqual, tc.fault)
+		d.startDrawing(10, 100)
+		_, hasFault := d.status()["fault"]
+		test.That(t, hasFault, test.ShouldBeFalse)
+	}
 }
 
 func TestWatchForce_aFrozenSensorStopsTheMove(t *testing.T) {

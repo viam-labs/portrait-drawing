@@ -168,8 +168,14 @@ The sensor is polled every 20 ms through every move of a drawing. Each descent
 is made in two moves, down to the margin and then onto the paper, so the limit
 changes at a known height. When a limit is passed the arm stops, lifts the pen
 straight up, and goes to `retreat_pose`, or else the rest pose. `status` then reports the job as
-`failed` with `"fault": "excess_force"`, and it stays resumable: take the cap
-off and send `resume`, which redraws the stroke that tripped. A sensor that
+`failed` with a `fault` that says which limit was passed, and it stays
+resumable: `resume` redraws the stroke that tripped.
+
+| `fault` | Limit passed | What to do before `resume` |
+|---|---|---|
+| `excess_force` | `contact_force`, before the pen should have reached the paper | Take the cap off the marker. |
+| `pressing_too_hard` | `max_force`, with the pen on the paper, or during [touch off](#finding-the-paper-by-touch) | Check the sheet is lying flat and the paper height is right. |
+ A sensor that
 cannot be read fails the drawing the same way, without the `fault`, since an
 unreadable guard is not guarding anything.
 
@@ -410,7 +416,8 @@ so this is how you find out what is happening — or whether anything is.
 `state` moves through `idle` → `moving_to_home_pose` → `capturing` →
 `generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
 (with `last_error`, and `fault` when the cause is one a person can clear, such
-as `excess_force` from the [`force_guard`](#a-cap-left-on-the-marker)). The
+as `excess_force` or `pressing_too_hard` from the
+[`force_guard`](#a-cap-left-on-the-marker)). The
 counts appear once drawing starts.
 
 Readable while a drawing is in flight: `executeDraw` holds the draw slot but not
