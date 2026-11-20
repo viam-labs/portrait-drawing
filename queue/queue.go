@@ -293,8 +293,8 @@ func newQueue(ctx context.Context, deps resource.Dependencies, conf resource.Con
 		q.paperSwapWait = 0
 	}
 	if d := cfg.CardDispenser; d.enabled() {
-		m, err := motor.FromProvider(deps, d.Motor)
-		if err != nil {
+		var m motor.Motor
+		if m, err = motor.FromProvider(deps, d.Motor); err != nil {
 			return nil, fmt.Errorf("reception-queue: get card_dispenser.motor %q: %w", d.Motor, err)
 		}
 		q.useDispenser(m, *d)
