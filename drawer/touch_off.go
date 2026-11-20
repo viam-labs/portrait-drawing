@@ -33,10 +33,10 @@ const (
 	touchReadings = 3
 	// stillBaselineN is how closely consecutive baselines must agree, well
 	// under touch_off.force.
-	stillBaselineN     = 0.1
-	maxBaselineTries   = 10
-	minTouchSpreadMM   = 20.0
-	maxTouchTiltPer1mm = 0.01
+	stillBaselineN         = 0.1
+	maxBaselineTries       = 10
+	minTouchSpreadMM       = 20.0
+	defaultMaxTiltPer100MM = 1.0
 )
 
 // TouchOffConfig finds the paper before each drawing by touching the pen down
@@ -59,6 +59,11 @@ type TouchOffConfig struct {
 	// MaxDepthMM is how far below the configured height a touch may go before
 	// it gives up: no paper there.
 	MaxDepthMM float64 `json:"max_depth_mm,omitempty"`
+	// MaxTiltPer100MM is the steepest plane the touches may fit before the
+	// drawing is refused as a sheet lying on something. Default 1. A surface
+	// that slopes by design, such as the top card of a spring-loaded stack held
+	// down at one end by a feed roller, needs more.
+	MaxTiltPer100MM float64 `json:"max_tilt_mm_per_100mm,omitempty"`
 	// PressMM is how far below the touched plane the pen draws, so it stays on
 	// the paper where the sheet dips. Each 0.1 mm presses about 1 N more with a
 	// felt tip on card.
@@ -84,6 +89,7 @@ func (c *TouchOffConfig) withDefaults() TouchOffConfig {
 	def(&out.StepMM, defaultTouchStepMM)
 	def(&out.FineStepMM, defaultTouchFineStepMM)
 	def(&out.MaxDepthMM, defaultTouchMaxDepthMM)
+	def(&out.MaxTiltPer100MM, defaultMaxTiltPer100MM)
 	return out
 }
 
@@ -93,7 +99,7 @@ func (c *TouchOffConfig) validate(guard *ForceGuardConfig) error {
 	}
 	for name, v := range map[string]float64{
 		"force": c.Force, "start_above_mm": c.StartAboveMM, "step_mm": c.StepMM, "fine_step_mm": c.FineStepMM,
-		"max_depth_mm": c.MaxDepthMM, "press_mm": c.pressMM(),
+		"max_depth_mm": c.MaxDepthMM, "press_mm": c.pressMM(), "max_tilt_mm_per_100mm": c.MaxTiltPer100MM,
 	} {
 		if v < 0 {
 			return fmt.Errorf("touch_off.%s must be >= 0 (0 uses the default), got %g", name, v)
@@ -244,9 +250,9 @@ func (d *drawer) touchOff(
 	if err != nil {
 		return nil, err
 	}
-	if plane.tilt() > maxTouchTiltPer1mm {
-		return nil, fmt.Errorf("the touches fit a plane sloping %.2f mm per 100 mm, more than a sheet lying flat; "+
-			"check the paper is flat and nothing was under the pen", 100*plane.tilt())
+	if 100*plane.tilt() > cfg.MaxTiltPer100MM {
+		return nil, fmt.Errorf("the touches fit a plane sloping %.2f mm per 100 mm, more than touch_off.max_tilt_mm_per_100mm (%g); "+
+			"check the paper is flat and nothing was under the pen", 100*plane.tilt(), cfg.MaxTiltPer100MM)
 	}
 	d.logger.Infof("drawer: touched off at z %.2f, %.2f, %.2f; paper slopes %.2f mm per 100 mm",
 		found[0].Z, found[1].Z, found[2].Z, 100*plane.tilt())
