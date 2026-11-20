@@ -249,7 +249,7 @@ def ink_strokes(lightness, mask, px_per_mm, exclude=None):
     if not mask.any():
         return []
     paper = np.median(lightness[mask > 0])
-    dark = ((lightness < paper * 0.6) & (mask > 0)).astype(np.uint8) * 255
+    dark = ((lightness < paper * 0.7) & (mask > 0)).astype(np.uint8) * 255
     if exclude is not None:
         x, y, w, h = exclude
         pad = int(2 * px_per_mm)

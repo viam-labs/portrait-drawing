@@ -174,3 +174,12 @@ def test_a_black_mat_under_glare():
                         cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
     assert sorted(s["kind"] for s in found) == ["card", "name_tag"]
     assert not any(s["used"] for s in found)
+
+
+def test_a_written_name_tag_is_used():
+    # Fine blue script on a yellow label under the mat's lights: the name drawn
+    # just before must count, or the next job writes over it.
+    found = find_sheets(cv2.imread(str(HERE / "testdata" / "written_tag.jpg")),
+                        cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
+    tags = [s for s in found if s["kind"] == "name_tag"]
+    assert len(tags) == 1 and tags[0]["used"]
