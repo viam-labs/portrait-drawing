@@ -231,3 +231,18 @@ func TestABadCardInTheWriteIsRefused(t *testing.T) {
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "paper.width_mm")
 }
+
+func TestWriteCarriesItsStrokeSpeed(t *testing.T) {
+	cfg := cardConfig()
+	cfg.StrokeSpeedDegsPerSec, cfg.StrokeAccelerationDegsPerSecPerSec = 15, 60
+	fake := &fakeDrawer{resp: map[string]interface{}{}}
+	w, _ := newTestWriter(t, cfg, fake, layoutJSON, nil)
+	_, err := w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada"}})
+	test.That(t, err, test.ShouldBeNil)
+	draw := fake.cmds[0]["draw"].(map[string]interface{})
+	test.That(t, draw["stroke_speed_degs_per_sec"], test.ShouldEqual, 15.0)
+	test.That(t, draw["stroke_acceleration_degs_per_sec_per_sec"], test.ShouldEqual, 60.0)
+
+	_, _, err = (&Config{Drawer: "d", PaperTopLeftCorner: card(), PaperWidthMM: 1, PaperHeightMM: 1, StrokeSpeedDegsPerSec: -1}).Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+}
