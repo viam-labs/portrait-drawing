@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1066,4 +1067,146 @@ func TestAPauseSurvivesARestart(t *testing.T) {
 	defer func() { test.That(t, q.Close(context.Background()), test.ShouldBeNil) }()
 	test.That(t, q.status()["paused"], test.ShouldNotBeNil)
 	expectNothingWritten(t, writer)
+}
+
+type fakeFeeder struct {
+	mu     sync.Mutex
+	steps  []string
+	err    error
+	starts []time.Time
+}
+
+func (f *fakeFeeder) SetPower(_ context.Context, power float64, _ map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.steps = append(f.steps, fmt.Sprintf("power %g", power))
+	f.starts = append(f.starts, time.Now())
+	return f.err
+}
+
+func (f *fakeFeeder) Stop(context.Context, map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.steps = append(f.steps, "stop")
+	return nil
+}
+
+func (f *fakeFeeder) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, s := range f.steps {
+		if s == "stop" {
+			n++
+		}
+	}
+	return n
+}
+
+func withDispenser(h *harness) *fakeFeeder {
+	f := &fakeFeeder{}
+	h.q.useDispenser(f, CardDispenserConfig{Motor: "card-feeder:feed-motor", FeedSec: 0.05, BackSec: 0.02})
+	return f
+}
+
+func TestADispensedPortraitIsDrawnOnTheBoxThenFedOut(t *testing.T) {
+	h := newHarness(t)
+	finder := withFinder(h)
+	feeder := withDispenser(h)
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.drawUntil(t, id, stateDone)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for feeder.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	feeder.mu.Lock()
+	test.That(t, feeder.steps, test.ShouldResemble, []string{"power 1", "power -1", "stop"})
+	test.That(t, feeder.starts[1].Sub(feeder.starts[0]), test.ShouldBeGreaterThanOrEqualTo, 50*time.Millisecond)
+	feeder.mu.Unlock()
+	test.That(t, finder.callsFor(sheetCard), test.ShouldEqual, 0)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	_, hasPaper := h.drawer.draws[0]["paper"]
+	test.That(t, hasPaper, test.ShouldBeFalse)
+}
+
+func TestAFailedFeedHoldsPortraitsUntilResume(t *testing.T) {
+	h := newHarness(t)
+	feeder := withDispenser(h)
+	feeder.err = errors.New("stalled")
+	h.q.start()
+	first := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.drawUntil(t, first, stateDone)
+	h.waitNeedsPaper(t, sheetCard)
+	test.That(t, needsPaper(h)[0].(map[string]any)["error"], test.ShouldContainSubstring, "stalled")
+
+	second := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	time.Sleep(50 * time.Millisecond)
+	s, err := h.q.jobSummary(second)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+
+	feeder.mu.Lock()
+	feeder.err = nil
+	feeder.mu.Unlock()
+	_, err = h.q.DoCommand(context.Background(), map[string]any{"resume": map[string]any{}})
+	test.That(t, err, test.ShouldBeNil)
+	h.drawUntil(t, second, stateDone)
+}
+
+func TestCardDispenserConfigIsChecked(t *testing.T) {
+	base := func() *Config { return &Config{Drawer: "d", StrokeGenerator: "g"} }
+	cfg := base()
+	cfg.CardDispenser = &CardDispenserConfig{Motor: "card-feeder:feed-motor", FeedSec: 2.5, BackSec: 0.3}
+	deps, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldContain, "card-feeder:feed-motor")
+
+	cfg.CardDispenser = &CardDispenserConfig{Motor: "m"}
+	_, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	cfg.CardDispenser = &CardDispenserConfig{FeedSec: 2.5}
+	_, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	cfg.CardDispenser = &CardDispenserConfig{Motor: "m", FeedSec: 2.5, Power: 1.5}
+	_, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+
+	// Switched off, the block is kept but neither checked nor depended on.
+	off := false
+	cfg.CardDispenser = &CardDispenserConfig{Enabled: &off, Motor: "card-feeder:feed-motor", FeedSec: 2.5}
+	deps, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldNotContain, "card-feeder:feed-motor")
+}
+
+func TestTheDispenserSizesPortraitsForItsDrawingArea(t *testing.T) {
+	h := newHarness(t)
+	h.q.useDispenser(&fakeFeeder{}, CardDispenserConfig{FeedSec: 1, PaperWidthMM: 86.3, PaperHeightMM: 120.5, MarginMM: 2})
+	test.That(t, h.q.paperW, test.ShouldEqual, 86.3)
+	test.That(t, h.q.paperH, test.ShouldEqual, 120.5)
+	test.That(t, h.q.margin, test.ShouldEqual, 2.0)
+	test.That(t, h.q.dispenserCfg.Power, test.ShouldEqual, defaultDispenserPower)
+}
+
+func TestAFeedThatFailsStillStopsTheMotor(t *testing.T) {
+	h := newHarness(t)
+	f := &fakeFeeder{err: errors.New("stalled")}
+	h.q.useDispenser(f, CardDispenserConfig{FeedSec: 0.01, BackSec: 0.01})
+	test.That(t, h.q.runFeed(context.Background(), h.q.dispenserCfg), test.ShouldNotBeNil)
+	test.That(t, f.steps[len(f.steps)-1], test.ShouldEqual, "stop")
+}
+
+func TestFeedCardRunsOneFeedWhenIdle(t *testing.T) {
+	h := newHarness(t)
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"feed_card": map[string]any{}})
+	test.That(t, err, test.ShouldNotBeNil)
+
+	f := withDispenser(h)
+	resp, err := h.q.DoCommand(context.Background(), map[string]any{"feed_card": map[string]any{}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp["fed"], test.ShouldBeTrue)
+	test.That(t, f.count(), test.ShouldEqual, 1)
 }
