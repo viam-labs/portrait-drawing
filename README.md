@@ -698,6 +698,7 @@ just do one job when asked.
 | `paper_width_mm`, `paper_height_mm`, `margin_mm` | number | no | Portrait paper geometry, which must match the drawer's. Default a 4×6 in card with an 8 mm margin. |
 | `state_file` | string | no | Where jobs are saved. Default a file named after the service in `$VIAM_MODULE_DATA`. |
 | `paper_finder` | string | no | A `paper-finder` that picks a blank sheet off the mat for each job. See [Sheets on a mat](#sheets-on-a-mat). Without it, jobs go on the drawer's and the writer's own fixed surfaces. |
+| `card_dispenser` | object | no | Portraits are drawn on the top card of a card dispenser, the drawer's own paper, and the card is then fed out, bringing up the next: `{"motor": "card-feeder:feed-motor", "revolutions": 2.5, "rpm": 60, "enabled": true}`. `revolutions` is what feeds exactly one card; `rpm` defaults to 60. Set `enabled` to false to put portraits back on the mat with `paper_finder` while keeping the motor's settings. Name tags use `paper_finder` either way. If a feed fails, portraits wait for `resume` and `status` reports `needs_paper` for `card` with the error. |
 
 ### Sheets on a mat
 

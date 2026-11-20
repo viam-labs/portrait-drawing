@@ -1067,3 +1067,96 @@ func TestAPauseSurvivesARestart(t *testing.T) {
 	test.That(t, q.status()["paused"], test.ShouldNotBeNil)
 	expectNothingWritten(t, writer)
 }
+
+type fakeFeeder struct {
+	mu    sync.Mutex
+	feeds [][2]float64
+	err   error
+}
+
+func (f *fakeFeeder) GoFor(_ context.Context, rpm, revolutions float64, _ map[string]any) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.feeds = append(f.feeds, [2]float64{rpm, revolutions})
+	return f.err
+}
+
+func (f *fakeFeeder) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.feeds)
+}
+
+func withDispenser(h *harness) *fakeFeeder {
+	f := &fakeFeeder{}
+	h.q.dispenser = f
+	h.q.dispenserCfg = CardDispenserConfig{Motor: "card-feeder:feed-motor", Revolutions: 2.5, RPM: 40}
+	return f
+}
+
+func TestADispensedPortraitIsDrawnOnTheBoxThenFedOut(t *testing.T) {
+	h := newHarness(t)
+	finder := withFinder(h)
+	feeder := withDispenser(h)
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.drawUntil(t, id, stateDone)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for feeder.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	test.That(t, feeder.feeds, test.ShouldResemble, [][2]float64{{40, 2.5}})
+	test.That(t, finder.callsFor(sheetCard), test.ShouldEqual, 0)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	_, hasPaper := h.drawer.draws[0]["paper"]
+	test.That(t, hasPaper, test.ShouldBeFalse)
+}
+
+func TestAFailedFeedHoldsPortraitsUntilResume(t *testing.T) {
+	h := newHarness(t)
+	feeder := withDispenser(h)
+	feeder.err = errors.New("stalled")
+	h.q.start()
+	first := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.drawUntil(t, first, stateDone)
+	h.waitNeedsPaper(t, sheetCard)
+	test.That(t, needsPaper(h)[0].(map[string]any)["error"], test.ShouldContainSubstring, "stalled")
+
+	second := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	time.Sleep(50 * time.Millisecond)
+	s, err := h.q.jobSummary(second)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+
+	feeder.mu.Lock()
+	feeder.err = nil
+	feeder.mu.Unlock()
+	_, err = h.q.DoCommand(context.Background(), map[string]any{"resume": map[string]any{}})
+	test.That(t, err, test.ShouldBeNil)
+	h.drawUntil(t, second, stateDone)
+}
+
+func TestCardDispenserConfigIsChecked(t *testing.T) {
+	base := func() *Config { return &Config{Drawer: "d", StrokeGenerator: "g"} }
+	cfg := base()
+	cfg.CardDispenser = &CardDispenserConfig{Motor: "card-feeder:feed-motor", Revolutions: 2}
+	deps, _, err := cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldContain, "card-feeder:feed-motor")
+
+	cfg.CardDispenser = &CardDispenserConfig{Motor: "m"}
+	_, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+	cfg.CardDispenser = &CardDispenserConfig{Revolutions: 2}
+	_, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldNotBeNil)
+
+	// Switched off, the block is kept but neither checked nor depended on.
+	off := false
+	cfg.CardDispenser = &CardDispenserConfig{Enabled: &off, Motor: "card-feeder:feed-motor", Revolutions: 2}
+	deps, _, err = cfg.Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, deps, test.ShouldNotContain, "card-feeder:feed-motor")
+}

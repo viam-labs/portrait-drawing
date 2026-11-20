@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/components/motor"
 	"go.viam.com/rdk/logging"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/generic"
@@ -105,7 +106,31 @@ type Config struct {
 	// sends it with the draw or write, instead of the drawer's and writer's own
 	// fixed surfaces. Without a sheet the job waits for resume.
 	PaperFinder string `json:"paper_finder,omitempty"`
+	// CardDispenser, when set, holds the portrait card: each portrait is drawn
+	// on the drawer's own paper, the top card of the dispenser, and the motor
+	// then feeds that card out, bringing up the next. The paper finder, if
+	// set, still picks name tags.
+	CardDispenser *CardDispenserConfig `json:"card_dispenser,omitempty"`
 }
+
+// CardDispenserConfig is the motor that feeds one card out.
+type CardDispenserConfig struct {
+	// Enabled switches portraits between the dispenser and, with it false, the
+	// paper finder or the drawer's own paper, keeping the motor's settings.
+	// Default true.
+	Enabled *bool `json:"enabled,omitempty"`
+	// Motor is the feed motor, e.g. "card-feeder:feed-motor" on a remote part.
+	Motor string `json:"motor"`
+	// Revolutions feeds exactly one card out; RPM is how fast. Default 60 RPM.
+	Revolutions float64 `json:"revolutions"`
+	RPM         float64 `json:"rpm,omitempty"`
+}
+
+func (c *CardDispenserConfig) enabled() bool {
+	return c != nil && (c.Enabled == nil || *c.Enabled)
+}
+
+const defaultDispenserRPM = 60
 
 // Validate returns implicit dependencies and any config errors.
 func (cfg *Config) Validate(path string) ([]string, []string, error) {
@@ -135,11 +160,24 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	if cfg.PaperFinder != "" {
 		deps = append(deps, cfg.PaperFinder)
 	}
+	if d := cfg.CardDispenser; d.enabled() {
+		if d.Motor == "" {
+			return nil, nil, resource.NewConfigValidationFieldRequiredError(path, "card_dispenser.motor")
+		}
+		if d.Revolutions <= 0 || d.RPM < 0 {
+			return nil, nil, fmt.Errorf("card_dispenser needs revolutions > 0 and rpm >= 0, got %g and %g", d.Revolutions, d.RPM)
+		}
+		deps = append(deps, d.Motor)
+	}
 	return deps, nil, nil
 }
 
 type commander interface {
 	DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error)
+}
+
+type feeder interface {
+	GoFor(ctx context.Context, rpm, revolutions float64, extra map[string]any) error
 }
 
 type paperWait struct {
@@ -184,6 +222,8 @@ type receptionQueue struct {
 	stateFile      string
 	paperSwapWait  time.Duration
 	finder         commander
+	dispenser      feeder
+	dispenserCfg   CardDispenserConfig
 
 	mu   sync.Mutex
 	jobs []*Job
@@ -241,6 +281,17 @@ func newQueue(ctx context.Context, deps resource.Dependencies, conf resource.Con
 			return nil, fmt.Errorf("reception-queue: get paper_finder %q: %w", cfg.PaperFinder, err)
 		}
 		// A used sheet is never picked again, so there is nothing to wait out.
+		q.paperSwapWait = 0
+	}
+	if d := cfg.CardDispenser; d.enabled() {
+		if q.dispenser, err = motor.FromProvider(deps, d.Motor); err != nil {
+			return nil, fmt.Errorf("reception-queue: get card_dispenser.motor %q: %w", d.Motor, err)
+		}
+		q.dispenserCfg = *d
+		if q.dispenserCfg.RPM == 0 {
+			q.dispenserCfg.RPM = defaultDispenserRPM
+		}
+		// The drawn card is fed out, so there is no sheet to swap by hand.
 		q.paperSwapWait = 0
 	}
 	if cfg.Photo != "" {
@@ -852,7 +903,7 @@ func (q *receptionQueue) run(ctx context.Context) {
 			if !q.pausedSince.IsZero() {
 				break
 			}
-			if q.needsSheetLocked(j) && q.needsPaper[sheetKind(j)] != nil {
+			if q.waitsForPaperLocked(j) {
 				continue
 			}
 			next = j
@@ -958,7 +1009,18 @@ func (q *receptionQueue) run(ctx context.Context) {
 
 // needsSheetLocked reports whether the job still has to be given a sheet.
 func (q *receptionQueue) needsSheetLocked(j *Job) bool {
-	return q.finder != nil && j.Paper == nil
+	return q.finder != nil && j.Paper == nil && !q.dispensedLocked(j)
+}
+
+// dispensedLocked reports whether the job is drawn on the dispenser's card.
+func (q *receptionQueue) dispensedLocked(j *Job) bool {
+	return q.dispenser != nil && !isCard(j)
+}
+
+// waitsForPaperLocked reports whether the job must wait for resume: no blank
+// sheet was found for it, or the dispenser failed to feed.
+func (q *receptionQueue) waitsForPaperLocked(j *Job) bool {
+	return (q.needsSheetLocked(j) || q.dispensedLocked(j)) && q.needsPaper[sheetKind(j)] != nil
 }
 
 func (q *receptionQueue) finish(job *Job, state string, err error) {
@@ -1123,6 +1185,22 @@ func (q *receptionQueue) portraitReturned(ctx context.Context, job *Job, resp ma
 		q.mu.Unlock()
 		q.logger.Infof("reception-queue: portrait %s done", job.ID)
 		q.finish(job, stateDone, nil)
+		q.feedCard(ctx)
+	}
+}
+
+// feedCard feeds the drawn card out of the dispenser, bringing up the next.
+// If it fails, portraits wait for resume, as for a missing sheet.
+func (q *receptionQueue) feedCard(ctx context.Context) {
+	if q.dispenser == nil {
+		return
+	}
+	q.logger.Infof("reception-queue: feeding the card out (%g revolutions at %g RPM)", q.dispenserCfg.Revolutions, q.dispenserCfg.RPM)
+	if err := q.dispenser.GoFor(ctx, q.dispenserCfg.RPM, q.dispenserCfg.Revolutions, nil); err != nil {
+		q.mu.Lock()
+		q.needsPaper[sheetCard] = &paperWait{since: time.Now(), err: "card dispenser: " + err.Error()}
+		q.mu.Unlock()
+		q.logger.Warnf("reception-queue: card dispenser: %v; portraits wait for resume", err)
 	}
 }
 
