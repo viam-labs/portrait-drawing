@@ -248,12 +248,12 @@ func (e *frozenForceError) Error() string {
 }
 
 func (e *excessForceError) Error() string {
-	where := "with the pen on the paper"
 	if e.clear {
-		where = "before the pen should have reached the paper"
+		return fmt.Sprintf("force %.3g over its baseline exceeded %.3g before the pen should have reached the paper; "+
+			"take the cap off the marker, then resume", e.force, e.limit)
 	}
-	return fmt.Sprintf("force %.3g over its baseline exceeded %.3g %s; take the cap off the marker, then resume",
-		e.force, e.limit, where)
+	return fmt.Sprintf("force %.3g over its baseline exceeded %.3g with the pen on the paper; "+
+		"the pen is pressing too hard: check the paper's height, and that the sheet is lying flat", e.force, e.limit)
 }
 
 // guardedMove is planAndExecuteThrough with the force watched for the whole

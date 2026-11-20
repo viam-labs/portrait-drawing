@@ -118,7 +118,7 @@ func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "cap")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "pressing too hard")
 	test.That(t, stops.Load(), test.ShouldEqual, 1)
 }
 

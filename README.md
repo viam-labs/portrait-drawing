@@ -200,7 +200,8 @@ the arm still, where the wrist sensor is precise:
 "touch_off": { "force": 0.8, "press_mm": 0.2 }
 ```
 
-At three points spanning what it is about to draw, the pen stops 1 mm above the
+At three of the drawing's own points, spanning as much of it as they can, so
+each touch lands on the sheet and its dot is drawn over, the pen stops 1 mm above the
 paper's configured height, takes a still reading, and steps down until the force
 reaches `force`: 0.2 mm at a time, then 0.05 mm once it first feels the paper,
 so a stiff surface is not overshot. The height is interpolated between the last

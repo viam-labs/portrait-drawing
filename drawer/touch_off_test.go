@@ -1,6 +1,7 @@
 package drawer
 
 import (
+	"math"
 	"testing"
 
 	"github.com/golang/geo/r3"
@@ -34,7 +35,27 @@ func TestPlaneThrough_refusesPointsInALine(t *testing.T) {
 
 func TestTouchPointsFor_spansTheDrawing(t *testing.T) {
 	pts := touchPointsFor([]Polyline{{{10, 20}, {90, 25}}, {{40, 140}, {50, 130}}}, 0)
-	test.That(t, pts, test.ShouldResemble, [3][2]float64{{10, 20}, {90, 20}, {50, 140}})
+	test.That(t, pts[:], test.ShouldContain, [2]float64{10, 20})
+	test.That(t, pts[:], test.ShouldContain, [2]float64{90, 25})
+	test.That(t, pts[:], test.ShouldContain, [2]float64{40, 140})
+}
+
+func TestTouchPointsFor_touchesTheSheetsNotTheGapsBetween(t *testing.T) {
+	// Crosses on two cards 200 mm apart: a box around them would touch the mat.
+	cross := func(x, y float64) []Polyline {
+		return []Polyline{{{x - 5, y}, {x + 5, y}}, {{x, y - 5}, {x, y + 5}}}
+	}
+	var polys []Polyline
+	polys = append(polys, cross(0, 0)...)
+	polys = append(polys, cross(200, 0)...)
+	polys = append(polys, cross(100, 150)...)
+	for _, p := range touchPointsFor(polys, 0) {
+		near := false
+		for _, c := range [][2]float64{{0, 0}, {200, 0}, {100, 150}} {
+			near = near || math.Hypot(p[0]-c[0], p[1]-c[1]) <= 5
+		}
+		test.That(t, near, test.ShouldBeTrue)
+	}
 }
 
 func TestTouchPointsFor_aTinyDrawingStillSpreadsTheTouches(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -148,15 +149,70 @@ func contactZ(samples []touchSample, force float64) (float64, bool) {
 	return 0, false
 }
 
-// touchPointsFor is where to touch: two corners and the far edge's middle of
-// the drawing's own extent, so the plane is measured where the pen will be.
+// touchPointsFor is where to touch: three of the drawing's own points spanning
+// the largest triangle, so each touch lands where the pen will draw, on the
+// sheet and not the mat around it, and its dot is drawn over. A drawing too
+// narrow to span one falls back to a box around it.
 func touchPointsFor(polylines []Polyline, first int) [3][2]float64 {
-	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	var pts [][2]float64
 	for _, poly := range polylines[first:] {
-		for _, p := range poly {
-			minX, maxX = math.Min(minX, p[0]), math.Max(maxX, p[0])
-			minY, maxY = math.Min(minY, p[1]), math.Max(maxY, p[1])
+		pts = append(pts, poly...)
+	}
+	hull := convexHull(pts)
+	var best [3][2]float64
+	bestArea := 0.0
+	for i := 0; i < len(hull); i++ {
+		for j := i + 1; j < len(hull); j++ {
+			for k := j + 1; k < len(hull); k++ {
+				if a := triangleArea(hull[i], hull[j], hull[k]); a > bestArea {
+					best, bestArea = [3][2]float64{hull[i], hull[j], hull[k]}, a
+				}
+			}
 		}
+	}
+	if bestArea >= minTouchSpreadMM*minTouchSpreadMM/2 {
+		return best
+	}
+	return boxTouchPoints(pts)
+}
+
+func triangleArea(a, b, c [2]float64) float64 {
+	return math.Abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])) / 2
+}
+
+// convexHull is the hull's corners, by Andrew's monotone chain.
+func convexHull(pts [][2]float64) [][2]float64 {
+	p := append([][2]float64(nil), pts...)
+	sort.Slice(p, func(i, j int) bool { return p[i][0] < p[j][0] || (p[i][0] == p[j][0] && p[i][1] < p[j][1]) })
+	if len(p) < 3 {
+		return p
+	}
+	cross := func(o, a, b [2]float64) float64 { return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]) }
+	hull := make([][2]float64, 0, 2*len(p))
+	for _, pass := range [2]bool{false, true} {
+		start := len(hull)
+		for n := range p {
+			q := p[n]
+			if pass {
+				q = p[len(p)-1-n]
+			}
+			for len(hull) >= start+2 && cross(hull[len(hull)-2], hull[len(hull)-1], q) <= 0 {
+				hull = hull[:len(hull)-1]
+			}
+			hull = append(hull, q)
+		}
+		hull = hull[:len(hull)-1]
+	}
+	return hull
+}
+
+// boxTouchPoints is two corners and the far edge's middle of a box around pts,
+// at least minTouchSpreadMM each way.
+func boxTouchPoints(pts [][2]float64) [3][2]float64 {
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for _, p := range pts {
+		minX, maxX = math.Min(minX, p[0]), math.Max(maxX, p[0])
+		minY, maxY = math.Min(minY, p[1]), math.Max(maxY, p[1])
 	}
 	grow := func(lo, hi float64) (float64, float64) {
 		if hi-lo >= minTouchSpreadMM {
