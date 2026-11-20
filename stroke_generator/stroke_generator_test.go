@@ -25,7 +25,7 @@ func TestConfigValidate_negativeSmooth(t *testing.T) {
 func ptr[T any](v T) *T { return &v }
 
 func TestParseGenerateArgs_valid(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"image_b64":       base64.StdEncoding.EncodeToString([]byte("fake image")),
 		"paper_width_mm":  215.9,
 		"paper_height_mm": 279.4,
@@ -42,7 +42,7 @@ func TestParseGenerateArgs_valid(t *testing.T) {
 }
 
 func TestParseGenerateArgs_marginDefaults(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"image_b64":       "abc",
 		"paper_width_mm":  100.0,
 		"paper_height_mm": 100.0,
@@ -53,7 +53,7 @@ func TestParseGenerateArgs_marginDefaults(t *testing.T) {
 }
 
 func TestParseGenerateArgs_missingImage(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"paper_width_mm":  100.0,
 		"paper_height_mm": 100.0,
 	}
@@ -63,7 +63,7 @@ func TestParseGenerateArgs_missingImage(t *testing.T) {
 }
 
 func TestParseGenerateArgs_missingPaperWidth(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"image_b64":       "abc",
 		"paper_height_mm": 100.0,
 	}
@@ -73,7 +73,7 @@ func TestParseGenerateArgs_missingPaperWidth(t *testing.T) {
 }
 
 func TestParseGenerateArgs_badRotate(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"image_b64":       "abc",
 		"paper_width_mm":  100.0,
 		"paper_height_mm": 100.0,
@@ -85,7 +85,7 @@ func TestParseGenerateArgs_badRotate(t *testing.T) {
 }
 
 func TestParseGenerateArgs_negativeMargin(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"image_b64":       "abc",
 		"paper_width_mm":  100.0,
 		"paper_height_mm": 100.0,
@@ -235,7 +235,7 @@ func TestBuildCLIArgs_depthBoundsPassedThrough(t *testing.T) {
 }
 
 func TestParseGenerateArgs_depthIsOptional(t *testing.T) {
-	got, err := parseGenerateArgs(map[string]interface{}{
+	got, err := parseGenerateArgs(map[string]any{
 		"image_b64":       base64.StdEncoding.EncodeToString([]byte("img")),
 		"paper_width_mm":  215.9,
 		"paper_height_mm": 279.4,
@@ -245,7 +245,7 @@ func TestParseGenerateArgs_depthIsOptional(t *testing.T) {
 }
 
 func TestParseGenerateArgs_depthCarried(t *testing.T) {
-	got, err := parseGenerateArgs(map[string]interface{}{
+	got, err := parseGenerateArgs(map[string]any{
 		"image_b64":       base64.StdEncoding.EncodeToString([]byte("img")),
 		"depth_b64":       base64.StdEncoding.EncodeToString([]byte("DEPTHMAP...")),
 		"paper_width_mm":  215.9,

@@ -18,15 +18,13 @@ import (
 	"go.viam.com/utils/protoutils"
 )
 
-func ptr[T any](v T) *T { return &v }
-
 func validConfig() *Config {
 	return &Config{
 		Camera:          "cam",
 		SourceName:      "color",
 		SurveyPose:      "mat-view",
 		ToolOrientation: &spatialmath.OrientationConfig{Type: spatialmath.OrientationVectorDegreesType, Value: map[string]any{"x": 0, "y": 0, "z": -1, "th": 0}},
-		PenDownZ:        ptr(290.0),
+		PenDownZ:        new(290.0),
 	}
 }
 
@@ -69,7 +67,7 @@ func TestConfigValidate_calibrationPoints(t *testing.T) {
 
 type fakeCamera struct{ filters [][]string }
 
-func (c *fakeCamera) Images(_ context.Context, filter []string, _ map[string]interface{}) (
+func (c *fakeCamera) Images(_ context.Context, filter []string, _ map[string]any) (
 	[]camera.NamedImage, resource.ResponseMetadata, error,
 ) {
 	c.filters = append(c.filters, filter)
@@ -79,16 +77,16 @@ func (c *fakeCamera) Images(_ context.Context, filter []string, _ map[string]int
 
 type fakeSwitch struct{ positions []uint32 }
 
-func (s *fakeSwitch) SetPosition(_ context.Context, p uint32, _ map[string]interface{}) error {
+func (s *fakeSwitch) SetPosition(_ context.Context, p uint32, _ map[string]any) error {
 	s.positions = append(s.positions, p)
 	return nil
 }
 
-type fakeDrawer struct{ cmds []map[string]interface{} }
+type fakeDrawer struct{ cmds []map[string]any }
 
-func (d *fakeDrawer) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (d *fakeDrawer) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
 	d.cmds = append(d.cmds, cmd)
-	return map[string]interface{}{"total_points": 1}, nil
+	return map[string]any{"total_points": 1}, nil
 }
 
 type fakePython struct {
@@ -114,17 +112,17 @@ func newTestFinder(t *testing.T, cfg *Config, py map[string]string) (*paperFinde
 // straight down, not mirrored.
 var halfScale = calibration{Homography: [3][3]float64{{0.5, 0, 0}, {0, -0.5, 0}, {0, 0, 1}}}
 
-func sheetJSON(t *testing.T, sheets ...map[string]interface{}) string {
+func sheetJSON(t *testing.T, sheets ...map[string]any) string {
 	t.Helper()
-	raw, err := json.Marshal(map[string]interface{}{"sheets": sheets})
+	raw, err := json.Marshal(map[string]any{"sheets": sheets})
 	test.That(t, err, test.ShouldBeNil)
 	return string(raw)
 }
 
 // cardAt is a card in pixels with its top-left at (u, v), at halfScale.
-func cardAt(u, v float64, used bool) map[string]interface{} {
+func cardAt(u, v float64, used bool) map[string]any {
 	w, h := 2*101.6, 2*152.4
-	return map[string]interface{}{
+	return map[string]any{
 		"kind": "card", "used": used, "strokes": 0,
 		"corners_px": [][2]float64{{u, v}, {u + w, v}, {u + w, v + h}, {u, v + h}},
 	}
@@ -132,7 +130,7 @@ func cardAt(u, v float64, used bool) map[string]interface{} {
 
 func TestFind_needsCalibration(t *testing.T) {
 	f, _, _, _, _ := newTestFinder(t, validConfig(), nil)
-	_, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{}})
+	_, err := f.DoCommand(context.Background(), map[string]any{"find": map[string]any{}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "calibrate")
 }
@@ -140,24 +138,24 @@ func TestFind_needsCalibration(t *testing.T) {
 func TestFind_goesToSurveyPoseAndReadsColour(t *testing.T) {
 	f, cam, sw, _, fp := newTestFinder(t, validConfig(), map[string]string{"sheets": `{"sheets":[]}`})
 	f.cal = &halfScale
-	_, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
+	_, err := f.DoCommand(context.Background(), map[string]any{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, sw.positions, test.ShouldResemble, []uint32{surveyPosition})
 	test.That(t, cam.filters, test.ShouldResemble, [][]string{{"color"}})
 	test.That(t, string(fp.stdin["sheets"]), test.ShouldEqual, "photo")
 }
 
-func paperOf(t *testing.T, sheet interface{}) (tl, tr map[string]interface{}, w, h float64) {
+func paperOf(t *testing.T, sheet any) (tl, tr map[string]any, w, h float64) {
 	t.Helper()
-	p := sheet.(map[string]interface{})["paper"].(map[string]interface{})
-	tl = p["top_left_corner"].(map[string]interface{})["translation"].(map[string]interface{})
-	return tl, p["top_right_corner"].(map[string]interface{}), p["width_mm"].(float64), p["height_mm"].(float64)
+	p := sheet.(map[string]any)["paper"].(map[string]any)
+	tl = p["top_left_corner"].(map[string]any)["translation"].(map[string]any)
+	return tl, p["top_right_corner"].(map[string]any), p["width_mm"].(float64), p["height_mm"].(float64)
 }
 
 func TestFind_placesACardInArmCoordinates(t *testing.T) {
 	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(400, 200, false))})
 	f.cal = &halfScale
-	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
+	out, err := f.DoCommand(context.Background(), map[string]any{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	sheets := mapsOf(t, out["sheets"])
 	test.That(t, len(sheets), test.ShouldEqual, 1)
@@ -175,7 +173,7 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 	sheets := sheetJSON(t, cardAt(1000, 0, false), cardAt(0, 0, false), cardAt(500, 0, true))
 	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheets})
 	f.cal = &halfScale
-	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"kind": "card"}})
+	out, err := f.DoCommand(context.Background(), map[string]any{"find": map[string]any{"kind": "card"}})
 	test.That(t, err, test.ShouldBeNil)
 	got := mapsOf(t, out["sheets"])
 	test.That(t, len(got), test.ShouldEqual, 2)
@@ -184,7 +182,7 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 	test.That(t, tl0["x"], test.ShouldAlmostEqual, 0.0)
 	test.That(t, tl1["x"], test.ShouldAlmostEqual, 500.0)
 
-	out, err = f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"include_used": true}})
+	out, err = f.DoCommand(context.Background(), map[string]any{"find": map[string]any{"include_used": true}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(mapsOf(t, out["sheets"])), test.ShouldEqual, 3)
 }
@@ -192,23 +190,23 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 func TestFind_kindFilter(t *testing.T) {
 	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(0, 0, false))})
 	f.cal = &halfScale
-	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"kind": "name_tag"}})
+	out, err := f.DoCommand(context.Background(), map[string]any{"find": map[string]any{"kind": "name_tag"}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, out["sheets"], test.ShouldBeEmpty)
 
-	_, err = f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"kind": "portrait"}})
+	_, err = f.DoCommand(context.Background(), map[string]any{"find": map[string]any{"kind": "portrait"}})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
 func TestFind_nameTagPaperIsTheLabelInsideItsBacking(t *testing.T) {
 	bw, bh := 2*(82+2*defaultBackingMarginMM), 2*(53+2*defaultBackingMarginMM)
-	tag := map[string]interface{}{
-		"kind": "name_tag", "used": false, "handwriting": 0, "logo": map[string]interface{}{"rotation": 0},
+	tag := map[string]any{
+		"kind": "name_tag", "used": false, "handwriting": 0, "logo": map[string]any{"rotation": 0},
 		"corners_px": [][2]float64{{0, 0}, {bw, 0}, {bw, bh}, {0, bh}},
 	}
 	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, tag)})
 	f.cal = &halfScale
-	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
+	out, err := f.DoCommand(context.Background(), map[string]any{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	tl, _, w, h := paperOf(t, mapsOf(t, out["sheets"])[0])
 	test.That(t, tl["x"], test.ShouldAlmostEqual, defaultBackingMarginMM)
@@ -222,7 +220,7 @@ func TestFind_rejectsWrongSizesAndMirroredCalibrations(t *testing.T) {
 	big["corners_px"] = [][2]float64{{0, 0}, {400, 0}, {400, 600}, {0, 600}}
 	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, big)})
 	f.cal = &halfScale
-	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
+	out, err := f.DoCommand(context.Background(), map[string]any{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, out["sheets"], test.ShouldBeEmpty)
 	rejected := mapsOf(t, out["rejected"])
@@ -230,7 +228,7 @@ func TestFind_rejectsWrongSizesAndMirroredCalibrations(t *testing.T) {
 
 	f, _, _, _, _ = newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(0, 0, false))})
 	f.cal = &calibration{Homography: [3][3]float64{{0.5, 0, 0}, {0, 0.5, 0}, {0, 0, 1}}}
-	out, err = f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
+	out, err = f.DoCommand(context.Background(), map[string]any{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, mapsOf(t, out["rejected"])[0]["reason"], test.ShouldContainSubstring, "mirrors")
 }
@@ -247,16 +245,16 @@ const fitOK = `{"homography": [[0.5,0,0],[0,-0.5,0],[0,0,1]], "rms_mm": 0.3, "ma
 
 func TestCalibrate_drawsACrossAtEachPoint(t *testing.T) {
 	f, _, _, dr, _ := newTestFinder(t, calibrationConfig(), map[string]string{"crosses": `{"crosses":[]}`, "fit": fitOK})
-	_, err := f.DoCommand(context.Background(), map[string]interface{}{"calibrate": nil})
+	_, err := f.DoCommand(context.Background(), map[string]any{"calibrate": nil})
 	test.That(t, err, test.ShouldBeNil)
 	// One draw per cross, so each touches off on its own sheet.
 	test.That(t, len(dr.cmds), test.ShouldEqual, 5)
-	draw := dr.cmds[0]["draw"].(map[string]interface{})
-	polylines := draw["polylines"].([]interface{})
+	draw := dr.cmds[0]["draw"].(map[string]any)
+	polylines := draw["polylines"].([]any)
 	test.That(t, len(polylines), test.ShouldEqual, 2)
 
-	paper := draw["paper"].(map[string]interface{})
-	tl := paper["top_left_corner"].(map[string]interface{})["translation"].(map[string]interface{})
+	paper := draw["paper"].(map[string]any)
+	tl := paper["top_left_corner"].(map[string]any)["translation"].(map[string]any)
 	margin := defaultCrossMM/2 + 5
 	// The first point is (150, -100), at the middle of its page.
 	test.That(t, tl["x"], test.ShouldEqual, 150-margin)
@@ -264,7 +262,7 @@ func TestCalibrate_drawsACrossAtEachPoint(t *testing.T) {
 	test.That(t, tl["z"], test.ShouldEqual, 290.0)
 	test.That(t, paper["width_mm"], test.ShouldEqual, 2*margin)
 	test.That(t, paper["height_mm"], test.ShouldEqual, 2*margin)
-	first := polylines[0].([]interface{})
+	first := polylines[0].([]any)
 	test.That(t, first[0], test.ShouldResemble, []float64{margin - defaultCrossMM/2, margin})
 	test.That(t, first[1], test.ShouldResemble, []float64{margin + defaultCrossMM/2, margin})
 }
@@ -272,7 +270,7 @@ func TestCalibrate_drawsACrossAtEachPoint(t *testing.T) {
 func TestCalibrate_fitsCrossesToTheArmPointsAndKeepsTheResult(t *testing.T) {
 	cfg := calibrationConfig()
 	f, _, _, _, fp := newTestFinder(t, cfg, map[string]string{"crosses": `{"crosses":[[1,2],[3,4]]}`, "fit": fitOK})
-	out, err := f.DoCommand(context.Background(), map[string]interface{}{"calibrate": map[string]interface{}{}})
+	out, err := f.DoCommand(context.Background(), map[string]any{"calibrate": map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, out["rms_mm"], test.ShouldEqual, 0.3)
 
@@ -297,7 +295,7 @@ func TestCalibrate_fitsCrossesToTheArmPointsAndKeepsTheResult(t *testing.T) {
 
 func TestCalibrate_withoutRedrawUsesTheCrossesAlreadyThere(t *testing.T) {
 	f, _, _, dr, _ := newTestFinder(t, calibrationConfig(), map[string]string{"crosses": `{"crosses":[]}`, "fit": fitOK})
-	_, err := f.DoCommand(context.Background(), map[string]interface{}{"calibrate": map[string]interface{}{"redraw": false}})
+	_, err := f.DoCommand(context.Background(), map[string]any{"calibrate": map[string]any{"redraw": false}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, dr.cmds, test.ShouldBeEmpty)
 }
@@ -305,7 +303,7 @@ func TestCalibrate_withoutRedrawUsesTheCrossesAlreadyThere(t *testing.T) {
 func TestCalibrate_refusesAFitFromTooFewCrosses(t *testing.T) {
 	fit := `{"homography": [[1,0,0],[0,1,0],[0,0,1]], "matched": [{},{},{},{}], "unmatched_arm_points": [[220,30]]}`
 	f, _, _, _, _ := newTestFinder(t, calibrationConfig(), map[string]string{"crosses": `{"crosses":[]}`, "fit": fit})
-	_, err := f.DoCommand(context.Background(), map[string]interface{}{"calibrate": nil})
+	_, err := f.DoCommand(context.Background(), map[string]any{"calibrate": nil})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "only 4 of 5")
 	_, statErr := os.Stat(f.calPath)
@@ -317,16 +315,16 @@ func TestLook_worksUncalibratedAndShowsTheView(t *testing.T) {
 	f, _, sw, _, fp := newTestFinder(t, validConfig(), map[string]string{"sheets": out})
 	view := &fakeDrawer{}
 	f.view, f.cfg.ViewCamera = view, "paper-view"
-	resp, err := f.DoCommand(context.Background(), map[string]interface{}{"look": map[string]interface{}{}})
+	resp, err := f.DoCommand(context.Background(), map[string]any{"look": map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(resp["sheets"].([]interface{})), test.ShouldEqual, 1)
+	test.That(t, len(resp["sheets"].([]any)), test.ShouldEqual, 1)
 	test.That(t, resp["view_camera"], test.ShouldEqual, "paper-view")
 	_, hasPNG := resp["annotated_png_b64"]
 	test.That(t, hasPNG, test.ShouldBeFalse)
 	test.That(t, sw.positions, test.ShouldResemble, []uint32{surveyPosition})
 	test.That(t, string(fp.stdin["sheets"]), test.ShouldEqual, "photo")
 	test.That(t, len(view.cmds), test.ShouldEqual, 1)
-	set := view.cmds[0]["set_image"].(map[string]interface{})
+	set := view.cmds[0]["set_image"].(map[string]any)
 	test.That(t, set["image_b64"], test.ShouldEqual, "cG5n")
 }
 
@@ -335,7 +333,7 @@ func TestFind_showsTheViewToo(t *testing.T) {
 	f.cal = &halfScale
 	view := &fakeDrawer{}
 	f.view = view
-	_, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{}})
+	_, err := f.DoCommand(context.Background(), map[string]any{"find": map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
 	// The fake output carries no image, so there is nothing to show.
 	test.That(t, len(view.cmds), test.ShouldEqual, 0)
@@ -349,11 +347,11 @@ func TestResponsesSurviveTheWire(t *testing.T) {
 		"sheets": sheets, "crosses": `{"crosses":[[1,2],[3,4]]}`, "fit": fitOK,
 	})
 	f.cal = &halfScale
-	for _, cmd := range []map[string]interface{}{
-		{"find": map[string]interface{}{"include_used": true}},
-		{"look": map[string]interface{}{}},
-		{"calibrate": map[string]interface{}{"redraw": false}},
-		{"status": map[string]interface{}{}},
+	for _, cmd := range []map[string]any{
+		{"find": map[string]any{"include_used": true}},
+		{"look": map[string]any{}},
+		{"calibrate": map[string]any{"redraw": false}},
+		{"status": map[string]any{}},
 	} {
 		out, err := f.DoCommand(context.Background(), cmd)
 		test.That(t, err, test.ShouldBeNil)
@@ -362,14 +360,14 @@ func TestResponsesSurviveTheWire(t *testing.T) {
 	}
 }
 
-// mapsOf reads a response list the way a caller must: as []interface{}.
-func mapsOf(t *testing.T, v interface{}) []map[string]interface{} {
+// mapsOf reads a response list the way a caller must: as []any.
+func mapsOf(t *testing.T, v any) []map[string]any {
 	t.Helper()
-	list, ok := v.([]interface{})
+	list, ok := v.([]any)
 	test.That(t, ok, test.ShouldBeTrue)
-	out := make([]map[string]interface{}, len(list))
+	out := make([]map[string]any, len(list))
 	for i, item := range list {
-		out[i] = item.(map[string]interface{})
+		out[i] = item.(map[string]any)
 	}
 	return out
 }

@@ -346,7 +346,7 @@ func (d *drawer) settledForce(ctx context.Context, baseline float64) (float64, e
 	case <-time.After(touchSettle):
 	}
 	var sum float64
-	for i := 0; i < touchReadings; i++ {
+	for range touchReadings {
 		v, err := d.forceGuard.read(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("force_guard: read %q: %w", d.forceGuard.reading, err)

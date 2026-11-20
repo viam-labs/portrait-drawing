@@ -27,12 +27,12 @@ func cardConfig() *Config {
 }
 
 type fakeDrawer struct {
-	cmds []map[string]interface{}
-	resp map[string]interface{}
+	cmds []map[string]any
+	resp map[string]any
 	err  error
 }
 
-func (f *fakeDrawer) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (f *fakeDrawer) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
 	f.cmds = append(f.cmds, cmd)
 	return f.resp, f.err
 }
@@ -79,17 +79,17 @@ func TestConfigValidate(t *testing.T) {
 }
 
 func TestParseWriteArgs(t *testing.T) {
-	a, err := parseWriteArgs(map[string]interface{}{"text": "  Ada Lovelace ", "cap_height_mm": 12.0, "preview": true})
+	a, err := parseWriteArgs(map[string]any{"text": "  Ada Lovelace ", "cap_height_mm": 12.0, "preview": true})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, a.Text, test.ShouldEqual, "Ada Lovelace")
 	test.That(t, a.CapHeightMM, test.ShouldEqual, 12.0)
 	test.That(t, a.Preview, test.ShouldBeTrue)
 
-	_, err = parseWriteArgs(map[string]interface{}{"text": "   "})
+	_, err = parseWriteArgs(map[string]any{"text": "   "})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "text is required")
 
-	_, err = parseWriteArgs(map[string]interface{}{"text": "Ada", "fill": 2.0})
+	_, err = parseWriteArgs(map[string]any{"text": "Ada", "fill": 2.0})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
@@ -124,22 +124,22 @@ func TestBuildCLIArgs(t *testing.T) {
 func TestWriteDrawsAndBlocksOnDrawer(t *testing.T) {
 	cfg := cardConfig()
 	cfg.PaperTopRightCorner = &r3.Vector{X: 100, Y: 135.9, Z: 20}
-	fake := &fakeDrawer{resp: map[string]interface{}{"total_points": 4}}
+	fake := &fakeDrawer{resp: map[string]any{"total_points": 4}}
 	w, _ := newTestWriter(t, cfg, fake, layoutJSON, nil)
 
-	resp, err := w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada"}})
+	resp, err := w.DoCommand(context.Background(), map[string]any{"write": map[string]any{"text": "Ada"}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(fake.cmds), test.ShouldEqual, 1)
-	draw := fake.cmds[0]["draw"].(map[string]interface{})
-	test.That(t, len(draw["polylines"].([]interface{})), test.ShouldEqual, 2)
+	draw := fake.cmds[0]["draw"].(map[string]any)
+	test.That(t, len(draw["polylines"].([]any)), test.ShouldEqual, 2)
 
 	// The card goes with every draw, as a plain map the drawer can parse back.
-	paper := draw["paper"].(map[string]interface{})
+	paper := draw["paper"].(map[string]any)
 	test.That(t, paper["width_mm"], test.ShouldEqual, 85.9)
-	test.That(t, paper["top_right_corner"].(map[string]interface{})["y"], test.ShouldEqual, 135.9)
-	corner := paper["top_left_corner"].(map[string]interface{})
-	test.That(t, corner["translation"].(map[string]interface{})["x"], test.ShouldEqual, 100.0)
-	test.That(t, corner["orientation"].(map[string]interface{})["type"], test.ShouldEqual, "ov_degrees")
+	test.That(t, paper["top_right_corner"].(map[string]any)["y"], test.ShouldEqual, 135.9)
+	corner := paper["top_left_corner"].(map[string]any)
+	test.That(t, corner["translation"].(map[string]any)["x"], test.ShouldEqual, 100.0)
+	test.That(t, corner["orientation"].(map[string]any)["type"], test.ShouldEqual, "ov_degrees")
 	test.That(t, resp["polylines_total"], test.ShouldEqual, 2)
 	test.That(t, resp["total_points"], test.ShouldEqual, 4)
 	test.That(t, resp["font"], test.ShouldEqual, "cursive (single-stroke)")
@@ -151,15 +151,15 @@ func TestWritePreviewDoesNotDraw(t *testing.T) {
 	fake := &fakeDrawer{}
 	w, _ := newTestWriter(t, cardConfig(), fake, layoutJSON, nil)
 
-	resp, err := w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada", "preview": true}})
+	resp, err := w.DoCommand(context.Background(), map[string]any{"write": map[string]any{"text": "Ada", "preview": true}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, fake.cmds, test.ShouldBeEmpty)
-	test.That(t, len(resp["polylines"].([]interface{})), test.ShouldEqual, 2)
+	test.That(t, len(resp["polylines"].([]any)), test.ShouldEqual, 2)
 }
 
 func TestWriteErrors(t *testing.T) {
 	cfg := cardConfig()
-	write := map[string]interface{}{"write": map[string]interface{}{"text": "Ada"}}
+	write := map[string]any{"write": map[string]any{"text": "Ada"}}
 
 	w, _ := newTestWriter(t, cfg, &fakeDrawer{}, "", errors.New("card is 85.9x59.2mm"))
 	_, err := w.DoCommand(context.Background(), write)
@@ -173,39 +173,39 @@ func TestWriteErrors(t *testing.T) {
 
 	// A paused drawer returns with the pen up and the text unfinished; that is
 	// not a written tag.
-	w, _ = newTestWriter(t, cfg, &fakeDrawer{resp: map[string]interface{}{"paused": true}}, layoutJSON, nil)
+	w, _ = newTestWriter(t, cfg, &fakeDrawer{resp: map[string]any{"paused": true}}, layoutJSON, nil)
 	_, err = w.DoCommand(context.Background(), write)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "paused")
 
-	_, err = w.DoCommand(context.Background(), map[string]interface{}{"nope": nil})
+	_, err = w.DoCommand(context.Background(), map[string]any{"nope": nil})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
 // foundTag is a name tag as the paper finder hands it over.
-func foundTag() map[string]interface{} {
-	return map[string]interface{}{
-		"top_left_corner": map[string]interface{}{
-			"translation": map[string]interface{}{"x": 250.0, "y": 80.0, "z": 281.0},
-			"orientation": map[string]interface{}{"type": "ov_degrees", "value": map[string]interface{}{"x": 0.0, "y": 0.0, "z": -1.0, "th": 0.0}},
+func foundTag() map[string]any {
+	return map[string]any{
+		"top_left_corner": map[string]any{
+			"translation": map[string]any{"x": 250.0, "y": 80.0, "z": 281.0},
+			"orientation": map[string]any{"type": "ov_degrees", "value": map[string]any{"x": 0.0, "y": 0.0, "z": -1.0, "th": 0.0}},
 		},
-		"top_right_corner": map[string]interface{}{"x": 250.0, "y": -2.0, "z": 281.0},
+		"top_right_corner": map[string]any{"x": 250.0, "y": -2.0, "z": 281.0},
 		"width_mm":         82.0,
 		"height_mm":        53.0,
 	}
 }
 
 func TestWriteOnTheCardItBrings(t *testing.T) {
-	fake := &fakeDrawer{resp: map[string]interface{}{}}
+	fake := &fakeDrawer{resp: map[string]any{}}
 	w, args := newTestWriter(t, cardConfig(), fake, layoutJSON, nil)
 
-	_, err := w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada", "paper": foundTag()}})
+	_, err := w.DoCommand(context.Background(), map[string]any{"write": map[string]any{"text": "Ada", "paper": foundTag()}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, strings.Join(*args, " "), test.ShouldContainSubstring, "--width-mm 82 --height-mm 53")
-	paper := fake.cmds[0]["draw"].(map[string]interface{})["paper"].(map[string]interface{})
+	paper := fake.cmds[0]["draw"].(map[string]any)["paper"].(map[string]any)
 	test.That(t, paper["width_mm"], test.ShouldEqual, 82.0)
-	test.That(t, paper["top_left_corner"].(map[string]interface{})["translation"].(map[string]interface{})["x"], test.ShouldEqual, 250.0)
-	test.That(t, paper["top_right_corner"].(map[string]interface{})["y"], test.ShouldEqual, -2.0)
+	test.That(t, paper["top_left_corner"].(map[string]any)["translation"].(map[string]any)["x"], test.ShouldEqual, 250.0)
+	test.That(t, paper["top_right_corner"].(map[string]any)["y"], test.ShouldEqual, -2.0)
 }
 
 func TestWithNoCardConfiguredEveryWriteMustBringOne(t *testing.T) {
@@ -213,13 +213,13 @@ func TestWithNoCardConfiguredEveryWriteMustBringOne(t *testing.T) {
 	_, _, err := cfg.Validate("")
 	test.That(t, err, test.ShouldBeNil)
 
-	fake := &fakeDrawer{resp: map[string]interface{}{}}
+	fake := &fakeDrawer{resp: map[string]any{}}
 	w, _ := newTestWriter(t, cfg, fake, layoutJSON, nil)
-	_, err = w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada"}})
+	_, err = w.DoCommand(context.Background(), map[string]any{"write": map[string]any{"text": "Ada"}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "no card")
 
-	_, err = w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada", "paper": foundTag()}})
+	_, err = w.DoCommand(context.Background(), map[string]any{"write": map[string]any{"text": "Ada", "paper": foundTag()}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, len(fake.cmds), test.ShouldEqual, 1)
 }
@@ -227,7 +227,7 @@ func TestWithNoCardConfiguredEveryWriteMustBringOne(t *testing.T) {
 func TestABadCardInTheWriteIsRefused(t *testing.T) {
 	bad := foundTag()
 	delete(bad, "width_mm")
-	_, err := parseWriteArgs(map[string]interface{}{"text": "Ada", "paper": bad})
+	_, err := parseWriteArgs(map[string]any{"text": "Ada", "paper": bad})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "paper.width_mm")
 }
@@ -235,11 +235,11 @@ func TestABadCardInTheWriteIsRefused(t *testing.T) {
 func TestWriteCarriesItsStrokeSpeed(t *testing.T) {
 	cfg := cardConfig()
 	cfg.StrokeSpeedDegsPerSec, cfg.StrokeAccelerationDegsPerSecPerSec = 15, 60
-	fake := &fakeDrawer{resp: map[string]interface{}{}}
+	fake := &fakeDrawer{resp: map[string]any{}}
 	w, _ := newTestWriter(t, cfg, fake, layoutJSON, nil)
-	_, err := w.DoCommand(context.Background(), map[string]interface{}{"write": map[string]interface{}{"text": "Ada"}})
+	_, err := w.DoCommand(context.Background(), map[string]any{"write": map[string]any{"text": "Ada"}})
 	test.That(t, err, test.ShouldBeNil)
-	draw := fake.cmds[0]["draw"].(map[string]interface{})
+	draw := fake.cmds[0]["draw"].(map[string]any)
 	test.That(t, draw["stroke_speed_degs_per_sec"], test.ShouldEqual, 15.0)
 	test.That(t, draw["stroke_acceleration_degs_per_sec_per_sec"], test.ShouldEqual, 60.0)
 

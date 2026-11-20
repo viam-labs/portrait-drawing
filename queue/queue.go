@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -92,7 +93,7 @@ type Config struct {
 	// NameTagCommand is the DoCommand sent to NameTagWriter. Every string value
 	// has "{name}" replaced with the visitor's name. It must block until the
 	// tag is finished and the pen is lifted.
-	NameTagCommand map[string]interface{} `json:"name_tag_command,omitempty"`
+	NameTagCommand map[string]any `json:"name_tag_command,omitempty"`
 	// Paper geometry for portraits; it must match the drawer's.
 	PaperWidthMM  float64 `json:"paper_width_mm,omitempty"`
 	PaperHeightMM float64 `json:"paper_height_mm,omitempty"`
@@ -138,7 +139,7 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 }
 
 type commander interface {
-	DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error)
+	DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error)
 }
 
 type paperWait struct {
@@ -148,24 +149,24 @@ type paperWait struct {
 
 // Job is one name tag, text line, or portrait. Portraits carry their strokes, never the photo.
 type Job struct {
-	ID      string                 `json:"id"`
-	Kind    string                 `json:"kind"`
-	Name    string                 `json:"name,omitempty"`
-	Visitor map[string]interface{} `json:"visitor,omitempty"`
+	ID      string         `json:"id"`
+	Kind    string         `json:"kind"`
+	Name    string         `json:"name,omitempty"`
+	Visitor map[string]any `json:"visitor,omitempty"`
 	// Write is a text job's payload for the writer's write verb.
-	Write        map[string]interface{} `json:"write,omitempty"`
-	State        string                 `json:"state"`
-	Polylines    [][][2]float64         `json:"polylines,omitempty"`
-	Total        int                    `json:"polylines_total,omitempty"`
-	NextPolyline int                    `json:"next_polyline,omitempty"`
-	Error        string                 `json:"error,omitempty"`
+	Write        map[string]any `json:"write,omitempty"`
+	State        string         `json:"state"`
+	Polylines    [][][2]float64 `json:"polylines,omitempty"`
+	Total        int            `json:"polylines_total,omitempty"`
+	NextPolyline int            `json:"next_polyline,omitempty"`
+	Error        string         `json:"error,omitempty"`
 	// Paper is the sheet the paper finder gave this job, kept so a paused
 	// portrait resumes on the same one. SheetAt is that sheet's centre.
-	Paper      map[string]interface{} `json:"paper,omitempty"`
-	SheetAt    *[2]float64            `json:"sheet_at,omitempty"`
-	CreatedAt  time.Time              `json:"created_at"`
-	StartedAt  time.Time              `json:"started_at,omitempty"`
-	FinishedAt time.Time              `json:"finished_at,omitempty"`
+	Paper      map[string]any `json:"paper,omitempty"`
+	SheetAt    *[2]float64    `json:"sheet_at,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	StartedAt  time.Time      `json:"started_at"`
+	FinishedAt time.Time      `json:"finished_at"`
 }
 
 type receptionQueue struct {
@@ -177,7 +178,7 @@ type receptionQueue struct {
 	generator      commander
 	writer         commander
 	photo          camera.Camera
-	nameTagCommand map[string]interface{}
+	nameTagCommand map[string]any
 	paperW, paperH float64
 	margin         float64
 	stateFile      string
@@ -194,8 +195,14 @@ type receptionQueue struct {
 	wake    chan struct{}
 	preempt chan struct{}
 
-	// cancelCard stops the card being written, so cancel_job can stop it.
-	cancelCard context.CancelFunc
+	// cancelActive ends the context of the job being drawn or written, so
+	// cancel_job and pause can stop it.
+	cancelActive context.CancelFunc
+	// pausedSince is when an operator paused the queue; nothing starts until resume.
+	pausedSince time.Time
+	// pauseInterrupted is the job pause stopped mid-draw, so it is put back
+	// rather than failed.
+	pauseInterrupted *Job
 
 	cancel  context.CancelFunc
 	workers sync.WaitGroup
@@ -262,7 +269,7 @@ func newWithClients(name resource.Name, logger logging.Logger, drawer, gen, writ
 		preempt:        make(chan struct{}, 1),
 	}
 	if q.nameTagCommand == nil {
-		q.nameTagCommand = map[string]interface{}{"write": map[string]interface{}{"text": "{name}"}}
+		q.nameTagCommand = map[string]any{"write": map[string]any{"text": "{name}"}}
 	}
 	return q
 }
@@ -277,18 +284,16 @@ func orDefault(v, d float64) float64 {
 func (q *receptionQueue) Name() resource.Name { return q.name }
 
 // Status is the resource-level status the app shows; it is the same as the status verb.
-func (q *receptionQueue) Status(context.Context) (map[string]interface{}, error) {
+func (q *receptionQueue) Status(context.Context) (map[string]any, error) {
 	return q.status(), nil
 }
 
 func (q *receptionQueue) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	q.cancel = cancel
-	q.workers.Add(1)
-	go func() {
-		defer q.workers.Done()
+	q.workers.Go(func() {
 		q.run(ctx)
-	}()
+	})
 	q.nudge(q.wake)
 }
 
@@ -307,12 +312,12 @@ func (q *receptionQueue) nudge(ch chan struct{}) {
 	}
 }
 
-func (q *receptionQueue) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (q *receptionQueue) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	v, err := verb.Single(cmd)
 	if err != nil {
 		return nil, err
 	}
-	args, _ := cmd[v].(map[string]interface{})
+	args, _ := cmd[v].(map[string]any)
 	switch v {
 	case "enqueue_portrait":
 		return q.enqueuePortrait(ctx, args)
@@ -328,25 +333,29 @@ func (q *receptionQueue) DoCommand(ctx context.Context, cmd map[string]interface
 		return q.cancelJob(ctx, str(args, "job_id"))
 	case "retry_job":
 		return q.retryJob(str(args, "job_id"))
+	case "pause":
+		return q.pause(ctx)
 	case "resume":
-		return q.resume(), nil
+		return q.resume()
+	case "go_home":
+		return q.goHome(ctx)
 	default:
 		return nil, fmt.Errorf("reception-queue: unknown verb %q; expected \"enqueue_portrait\", \"enqueue_name_tag\", "+
-			"\"enqueue_text\", \"status\", \"job\", \"cancel_job\", \"retry_job\", or \"resume\"", v)
+			"\"enqueue_text\", \"status\", \"job\", \"cancel_job\", \"retry_job\", \"pause\", \"resume\", or \"go_home\"", v)
 	}
 }
 
-func str(m map[string]interface{}, key string) string {
+func str(m map[string]any, key string) string {
 	s, _ := m[key].(string)
 	return s
 }
 
-func visitorOf(args map[string]interface{}) map[string]interface{} {
-	v, _ := args["visitor"].(map[string]interface{})
+func visitorOf(args map[string]any) map[string]any {
+	v, _ := args["visitor"].(map[string]any)
 	return v
 }
 
-func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]interface{}) (map[string]interface{}, error) {
+func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]any) (map[string]any, error) {
 	image := str(args, "image_b64")
 	if image == "" {
 		if q.photo == nil {
@@ -358,7 +367,7 @@ func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]in
 			return nil, err
 		}
 	}
-	resp, err := q.generator.DoCommand(ctx, map[string]interface{}{"generate": map[string]interface{}{
+	resp, err := q.generator.DoCommand(ctx, map[string]any{"generate": map[string]any{
 		"image_b64":       image,
 		"paper_width_mm":  q.paperW,
 		"paper_height_mm": q.paperH,
@@ -401,12 +410,12 @@ func (q *receptionQueue) readPhoto(ctx context.Context) (string, error) {
 func (q *receptionQueue) clearPhoto() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := q.photo.DoCommand(ctx, map[string]interface{}{"clear": map[string]interface{}{}}); err != nil {
+	if _, err := q.photo.DoCommand(ctx, map[string]any{"clear": map[string]any{}}); err != nil {
 		q.logger.Errorf("reception-queue: clear photo; the visitor's photo is still on the camera: %v", err)
 	}
 }
 
-func (q *receptionQueue) enqueueNameTag(args map[string]interface{}) (map[string]interface{}, error) {
+func (q *receptionQueue) enqueueNameTag(args map[string]any) (map[string]any, error) {
 	if q.writer == nil {
 		return nil, errors.New("reception-queue: no name_tag_writer is configured")
 	}
@@ -420,7 +429,7 @@ func (q *receptionQueue) enqueueNameTag(args map[string]interface{}) (map[string
 
 // enqueueText queues a line of text for the writer. Only the write verb's
 // sizing options pass through, so a caller cannot turn the job into a preview.
-func (q *receptionQueue) enqueueText(args map[string]interface{}) (map[string]interface{}, error) {
+func (q *receptionQueue) enqueueText(args map[string]any) (map[string]any, error) {
 	if q.writer == nil {
 		return nil, errors.New("reception-queue: no name_tag_writer is configured")
 	}
@@ -428,7 +437,7 @@ func (q *receptionQueue) enqueueText(args map[string]interface{}) (map[string]in
 	if text == "" {
 		return nil, errors.New("reception-queue: enqueue_text needs text")
 	}
-	write := map[string]interface{}{"text": text}
+	write := map[string]any{"text": text}
 	for _, k := range []string{"cap_height_mm", "fill"} {
 		v, ok := args[k]
 		if !ok {
@@ -447,7 +456,7 @@ func (q *receptionQueue) enqueueText(args map[string]interface{}) (map[string]in
 }
 
 // addCard queues a writer job and asks a drawing portrait to make way for it.
-func (q *receptionQueue) addCard(job *Job) (map[string]interface{}, error) {
+func (q *receptionQueue) addCard(job *Job) (map[string]any, error) {
 	out, err := q.add(job)
 	if err == nil {
 		q.nudge(q.preempt)
@@ -455,7 +464,7 @@ func (q *receptionQueue) addCard(job *Job) (map[string]interface{}, error) {
 	return out, err
 }
 
-func (q *receptionQueue) add(job *Job) (map[string]interface{}, error) {
+func (q *receptionQueue) add(job *Job) (map[string]any, error) {
 	q.mu.Lock()
 	q.jobs = append(q.jobs, job)
 	err := q.saveLocked()
@@ -466,10 +475,10 @@ func (q *receptionQueue) add(job *Job) (map[string]interface{}, error) {
 	}
 	q.nudge(q.wake)
 	q.logger.Infof("reception-queue: queued %s %s (position %d)", job.Kind, job.ID, pos)
-	return map[string]interface{}{"job_id": job.ID, "position": pos}, nil
+	return map[string]any{"job_id": job.ID, "position": pos}, nil
 }
 
-func (q *receptionQueue) cancelJob(ctx context.Context, id string) (map[string]interface{}, error) {
+func (q *receptionQueue) cancelJob(ctx context.Context, id string) (map[string]any, error) {
 	q.mu.Lock()
 	job := q.findLocked(id)
 	if job == nil {
@@ -484,13 +493,13 @@ func (q *receptionQueue) cancelJob(ctx context.Context, id string) (map[string]i
 	}
 	job.State, job.FinishedAt = stateCanceled, time.Now()
 	err := q.saveLocked()
-	cancelCard := q.cancelCard
+	cancelActive := q.cancelActive
 	q.mu.Unlock()
-	if wasActive && isCard(job) && cancelCard != nil {
-		cancelCard()
+	if wasActive && isCard(job) && cancelActive != nil {
+		cancelActive()
 	}
 	if wasActive {
-		if _, cerr := q.drawer.DoCommand(ctx, map[string]interface{}{"cancel": map[string]interface{}{}}); cerr != nil {
+		if _, cerr := q.drawer.DoCommand(ctx, map[string]any{"cancel": map[string]any{}}); cerr != nil {
 			q.logger.Warnf("reception-queue: cancel drawer: %v", cerr)
 		}
 	}
@@ -500,7 +509,7 @@ func (q *receptionQueue) cancelJob(ctx context.Context, id string) (map[string]i
 	return q.jobSummary(id)
 }
 
-func (q *receptionQueue) retryJob(id string) (map[string]interface{}, error) {
+func (q *receptionQueue) retryJob(id string) (map[string]any, error) {
 	q.mu.Lock()
 	job := q.findLocked(id)
 	if job == nil || job.State != stateFailed {
@@ -524,8 +533,8 @@ func (q *receptionQueue) retryJob(id string) (map[string]interface{}, error) {
 	return q.jobSummary(id)
 }
 
-func summary(j *Job) map[string]interface{} {
-	out := map[string]interface{}{"job_id": j.ID, "kind": j.Kind, "state": j.State, "created_at": j.CreatedAt.UTC().Format(time.RFC3339)}
+func summary(j *Job) map[string]any {
+	out := map[string]any{"job_id": j.ID, "kind": j.Kind, "state": j.State, "created_at": j.CreatedAt.UTC().Format(time.RFC3339)}
 	if j.Name != "" {
 		out["name"] = j.Name
 	}
@@ -548,7 +557,7 @@ func summary(j *Job) map[string]interface{} {
 	return out
 }
 
-func (q *receptionQueue) jobSummary(id string) (map[string]interface{}, error) {
+func (q *receptionQueue) jobSummary(id string) (map[string]any, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	job := q.findLocked(id)
@@ -562,12 +571,12 @@ func (q *receptionQueue) jobSummary(id string) (map[string]interface{}, error) {
 	return out, nil
 }
 
-func (q *receptionQueue) status() map[string]interface{} {
+func (q *receptionQueue) status() map[string]any {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	var active interface{}
-	waiting := []interface{}{}
-	finished := []interface{}{}
+	var active any
+	waiting := []any{}
+	finished := []any{}
 	for _, j := range q.orderedLocked() {
 		waiting = append(waiting, summary(j))
 	}
@@ -579,15 +588,18 @@ func (q *receptionQueue) status() map[string]interface{} {
 			finished = append(finished, summary(j))
 		}
 	}
-	out := map[string]interface{}{"active": active, "waiting": waiting, "finished": finished}
+	out := map[string]any{"active": active, "waiting": waiting, "finished": finished}
+	if !q.pausedSince.IsZero() {
+		out["paused"] = map[string]any{"since": q.pausedSince.UTC().Format(time.RFC3339)}
+	}
 	if len(q.needsPaper) > 0 {
-		needs := []interface{}{}
+		needs := []any{}
 		for _, kind := range []string{sheetNameTag, sheetCard} {
 			w := q.needsPaper[kind]
 			if w == nil {
 				continue
 			}
-			n := map[string]interface{}{"kind": kind, "since": w.since.UTC().Format(time.RFC3339)}
+			n := map[string]any{"kind": kind, "since": w.since.UTC().Format(time.RFC3339)}
 			if w.err != "" {
 				n["error"] = w.err
 			}
@@ -598,16 +610,94 @@ func (q *receptionQueue) status() map[string]interface{} {
 	return out
 }
 
-// resume is what a person sends after putting paper down: jobs waiting for a
-// sheet look again.
-func (q *receptionQueue) resume() map[string]interface{} {
+// pause stops the arm where it is, mid-stroke or mid-letter, and holds every
+// job until resume. A card it interrupts goes back to the front of the queue on
+// a fresh sheet; a portrait resumes from the stroke it was on.
+func (q *receptionQueue) pause(ctx context.Context) (map[string]any, error) {
 	q.mu.Lock()
-	q.needsPaper = map[string]*paperWait{}
+	if q.pausedSince.IsZero() {
+		q.pausedSince = time.Now()
+	}
+	for _, j := range q.jobs {
+		if j.State == stateActive {
+			q.pauseInterrupted = j
+		}
+	}
+	cancelActive := q.cancelActive
+	err := q.saveLocked()
 	q.mu.Unlock()
+	q.logger.Info("reception-queue: paused")
+	// Stop the arm first: the drawer only stops it while it still holds the draw.
+	if _, cerr := q.drawer.DoCommand(ctx, map[string]any{"cancel": map[string]any{}}); cerr != nil {
+		q.logger.Warnf("reception-queue: cancel drawer: %v", cerr)
+	}
+	if cancelActive != nil {
+		cancelActive()
+	}
+	if err != nil {
+		return nil, err
+	}
+	return q.status(), nil
+}
+
+// resume lifts a pause, and is what a person sends after putting paper down:
+// jobs waiting for a sheet look again.
+func (q *receptionQueue) resume() (map[string]any, error) {
+	q.mu.Lock()
+	wasPaused := !q.pausedSince.IsZero()
+	q.pausedSince = time.Time{}
+	q.needsPaper = map[string]*paperWait{}
+	err := q.saveLocked()
+	q.mu.Unlock()
+	if wasPaused {
+		q.logger.Info("reception-queue: resumed")
+	}
 	q.nudge(q.wake)
 	// A tag that can now be written should not wait out a portrait.
 	q.nudge(q.preempt)
-	return q.status()
+	if err != nil {
+		return nil, err
+	}
+	return q.status(), nil
+}
+
+// goHome sends the arm to the drawer's rest pose. Only while paused, so it
+// never fights a job for the arm.
+func (q *receptionQueue) goHome(ctx context.Context) (map[string]any, error) {
+	q.mu.Lock()
+	paused := !q.pausedSince.IsZero()
+	q.mu.Unlock()
+	if !paused {
+		return nil, errors.New("reception-queue: go_home only works while paused; send pause first")
+	}
+	return q.drawer.DoCommand(ctx, map[string]any{"go_home": map[string]any{}})
+}
+
+// takePauseInterruptLocked reports whether pause stopped job mid-draw, and
+// clears the mark.
+func (q *receptionQueue) takePauseInterruptLocked(job *Job) bool {
+	if q.pauseInterrupted != job {
+		return false
+	}
+	q.pauseInterrupted = nil
+	return true
+}
+
+// requeueFirstLocked puts a card pause interrupted back at the front of the
+// queue. Its sheet may be part-written, so it gets a fresh one.
+func (q *receptionQueue) requeueFirstLocked(job *Job) {
+	job.State, job.Error = stateQueued, ""
+	job.Paper, job.SheetAt = nil, nil
+	jobs := []*Job{job}
+	for _, j := range q.jobs {
+		if j != job {
+			jobs = append(jobs, j)
+		}
+	}
+	q.jobs = jobs
+	if err := q.saveLocked(); err != nil {
+		q.logger.Warnf("reception-queue: %v", err)
+	}
 }
 
 // sheetKind is what a job is drawn on: portraits on cards, the writer's jobs on name tags.
@@ -636,16 +726,16 @@ func (q *receptionQueue) heldSheetsLocked(except *Job) [][2]float64 {
 
 // findSheet asks the paper finder for the nearest blank sheet of kind that no
 // other job owns.
-func (q *receptionQueue) findSheet(ctx context.Context, kind string, held [][2]float64) (map[string]interface{}, [2]float64, error) {
-	resp, err := q.finder.DoCommand(ctx, map[string]interface{}{"find": map[string]interface{}{"kind": kind}})
+func (q *receptionQueue) findSheet(ctx context.Context, kind string, held [][2]float64) (map[string]any, [2]float64, error) {
+	resp, err := q.finder.DoCommand(ctx, map[string]any{"find": map[string]any{"kind": kind}})
 	if err != nil {
 		return nil, [2]float64{}, fmt.Errorf("find a %s: %w", kind, err)
 	}
-	sheets, _ := resp["sheets"].([]interface{})
+	sheets, _ := resp["sheets"].([]any)
 	for _, raw := range sheets {
-		sheet, _ := raw.(map[string]interface{})
-		paper, _ := sheet["paper"].(map[string]interface{})
-		center, _ := sheet["center"].(map[string]interface{})
+		sheet, _ := raw.(map[string]any)
+		paper, _ := sheet["paper"].(map[string]any)
+		center, _ := sheet["center"].(map[string]any)
 		x, xok := center["x"].(float64)
 		y, yok := center["y"].(float64)
 		if paper == nil || !xok || !yok {
@@ -666,21 +756,19 @@ func (q *receptionQueue) findSheet(ctx context.Context, kind string, held [][2]f
 }
 
 // withPaper adds the job's sheet to the writer command's payload.
-func withPaper(cmd, paper map[string]interface{}) map[string]interface{} {
+func withPaper(cmd, paper map[string]any) map[string]any {
 	if paper == nil {
 		return cmd
 	}
-	out := make(map[string]interface{}, len(cmd))
+	out := make(map[string]any, len(cmd))
 	for v, payload := range cmd {
-		args, ok := payload.(map[string]interface{})
+		args, ok := payload.(map[string]any)
 		if !ok {
 			out[v] = payload
 			continue
 		}
-		withSheet := make(map[string]interface{}, len(args)+1)
-		for k, val := range args {
-			withSheet[k] = val
-		}
+		withSheet := make(map[string]any, len(args)+1)
+		maps.Copy(withSheet, args)
 		withSheet["paper"] = paper
 		out[v] = withSheet
 	}
@@ -761,6 +849,9 @@ func (q *receptionQueue) run(ctx context.Context) {
 		var next *Job
 		var swapLeft time.Duration
 		for _, j := range q.orderedLocked() {
+			if !q.pausedSince.IsZero() {
+				break
+			}
 			if q.needsSheetLocked(j) && q.needsPaper[sheetKind(j)] != nil {
 				continue
 			}
@@ -791,7 +882,7 @@ func (q *receptionQueue) run(ctx context.Context) {
 			continue
 		}
 
-		var paper map[string]interface{}
+		var paper map[string]any
 		var at [2]float64
 		var findErr error
 		if needSheet {
@@ -801,8 +892,11 @@ func (q *receptionQueue) run(ctx context.Context) {
 			}
 		}
 		q.mu.Lock()
-		// It may have been canceled while the finder looked.
-		if next.State != stateQueued && next.State != statePaused {
+		// It may have been canceled, or the queue paused, while the finder looked.
+		if (next.State != stateQueued && next.State != statePaused) || !q.pausedSince.IsZero() {
+			if paper != nil && !q.pausedSince.IsZero() {
+				next.Paper, next.SheetAt = paper, &at
+			}
 			q.mu.Unlock()
 			continue
 		}
@@ -838,13 +932,19 @@ func (q *receptionQueue) run(ctx context.Context) {
 		if err := q.saveLocked(); err != nil {
 			q.logger.Warnf("reception-queue: %v", err)
 		}
+		jobCtx, cancelJob := context.WithCancel(ctx)
+		q.cancelActive = cancelJob
 		q.mu.Unlock()
 
 		if isCard(next) {
-			q.runCard(ctx, next)
+			q.runCard(jobCtx, next)
 		} else {
-			q.runPortrait(ctx, next)
+			q.runPortrait(ctx, jobCtx, next)
 		}
+		q.mu.Lock()
+		q.cancelActive = nil
+		q.mu.Unlock()
+		cancelJob()
 		if ctx.Err() != nil {
 			return
 		}
@@ -881,25 +981,24 @@ func (q *receptionQueue) finish(job *Job, state string, err error) {
 }
 
 func (q *receptionQueue) runCard(ctx context.Context, job *Job) {
-	cmd := map[string]interface{}{"write": job.Write}
+	cmd := map[string]any{"write": job.Write}
 	if job.Kind == kindNameTag {
-		cmd = fillName(q.nameTagCommand, job.Name).(map[string]interface{})
+		cmd = fillName(q.nameTagCommand, job.Name).(map[string]any)
 	}
 	cmd = withPaper(cmd, job.Paper)
 	q.logger.Infof("reception-queue: writing %s %s", job.Kind, job.ID)
-	cardCtx, cancel := context.WithCancel(ctx)
+	_, err := q.writer.DoCommand(ctx, cmd)
 	q.mu.Lock()
-	q.cancelCard = cancel
-	q.mu.Unlock()
-	defer func() {
-		q.mu.Lock()
-		q.cancelCard = nil
+	interrupted := q.takePauseInterruptLocked(job) && (err != nil || ctx.Err() != nil)
+	if interrupted && job.State != stateCanceled {
+		q.requeueFirstLocked(job)
 		q.mu.Unlock()
-		cancel()
-	}()
-	_, err := q.writer.DoCommand(cardCtx, cmd)
+		q.logger.Infof("reception-queue: %s %s interrupted by pause; it goes first on resume", job.Kind, job.ID)
+		return
+	}
+	q.mu.Unlock()
 	switch {
-	case cardCtx.Err() != nil:
+	case ctx.Err() != nil:
 		q.finish(job, stateFailed, errors.New(interruptedCard))
 	case err != nil:
 		q.logger.Warnf("reception-queue: %s %s failed: %v", job.Kind, job.ID, err)
@@ -909,7 +1008,9 @@ func (q *receptionQueue) runCard(ctx context.Context, job *Job) {
 	}
 }
 
-func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
+// runPortrait draws job on the drawer. jobCtx ends the draw; ctx is the
+// worker's, for everything that must outlive it.
+func (q *receptionQueue) runPortrait(ctx, jobCtx context.Context, job *Job) {
 	q.mu.Lock()
 	start, total := job.NextPolyline, len(job.Polylines)
 	q.mu.Unlock()
@@ -922,16 +1023,16 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 	}
 
 	type result struct {
-		resp map[string]interface{}
+		resp map[string]any
 		err  error
 	}
-	draw := map[string]interface{}{"polylines": polylinesArg(job.Polylines), "start_at": start}
+	draw := map[string]any{"polylines": polylinesArg(job.Polylines), "start_at": start}
 	if job.Paper != nil {
 		draw["paper"] = job.Paper
 	}
 	done := make(chan result, 1)
 	go func() {
-		resp, err := q.drawer.DoCommand(ctx, map[string]interface{}{"draw": draw})
+		resp, err := q.drawer.DoCommand(jobCtx, map[string]any{"draw": draw})
 		done <- result{resp, err}
 	}()
 
@@ -962,7 +1063,7 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 			q.logger.Infof("reception-queue: pausing portrait %s for a card", job.ID)
 			go func() {
 				defer close(paused)
-				if _, err := q.drawer.DoCommand(ctx, map[string]interface{}{"pause": map[string]interface{}{}}); err != nil {
+				if _, err := q.drawer.DoCommand(ctx, map[string]any{"pause": map[string]any{}}); err != nil {
 					q.logger.Warnf("reception-queue: pause drawer: %v", err)
 				}
 			}()
@@ -973,7 +1074,7 @@ func (q *receptionQueue) runPortrait(ctx context.Context, job *Job) {
 }
 
 func (q *receptionQueue) recordProgress(ctx context.Context, job *Job) {
-	st, err := q.drawer.DoCommand(ctx, map[string]interface{}{"status": map[string]interface{}{}})
+	st, err := q.drawer.DoCommand(ctx, map[string]any{"status": map[string]any{}})
 	if err != nil {
 		return
 	}
@@ -991,16 +1092,24 @@ func (q *receptionQueue) recordProgress(ctx context.Context, job *Job) {
 	}
 }
 
-func (q *receptionQueue) portraitReturned(ctx context.Context, job *Job, resp map[string]interface{}, err error) {
+func (q *receptionQueue) portraitReturned(ctx context.Context, job *Job, resp map[string]any, err error) {
 	if next, ok := toInt(resp["next_polyline"]); ok {
 		q.mu.Lock()
 		job.NextPolyline = next
 		q.mu.Unlock()
 	}
+	q.mu.Lock()
+	interrupted := q.takePauseInterruptLocked(job)
+	q.mu.Unlock()
 	switch {
 	case ctx.Err() != nil:
 		// Shutting down: keep it resumable for the next start.
 		q.recordProgress(context.Background(), job)
+		q.finish(job, statePaused, nil)
+	case interrupted && err != nil:
+		// The stroke it stopped on is drawn again from its start on resume.
+		q.recordProgress(context.Background(), job)
+		q.logger.Infof("reception-queue: portrait %s interrupted by pause", job.ID)
 		q.finish(job, statePaused, nil)
 	case err != nil:
 		q.recordProgress(context.Background(), job)
@@ -1025,9 +1134,16 @@ func (q *receptionQueue) load() error {
 	if err != nil {
 		return fmt.Errorf("reception-queue: read %s: %w", q.stateFile, err)
 	}
-	var jobs []*Job
-	if err := json.Unmarshal(raw, &jobs); err != nil {
-		return fmt.Errorf("reception-queue: parse %s: %w", q.stateFile, err)
+	var st savedState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		// State saved before pause existed is a bare list of jobs.
+		if lerr := json.Unmarshal(raw, &st.Jobs); lerr != nil {
+			return fmt.Errorf("reception-queue: parse %s: %w", q.stateFile, err)
+		}
+	}
+	jobs := st.Jobs
+	if st.PausedSince != nil {
+		q.pausedSince = *st.PausedSince
 	}
 	for _, j := range jobs {
 		if j.Total == 0 {
@@ -1049,8 +1165,18 @@ func (q *receptionQueue) load() error {
 	return nil
 }
 
+// savedState is what state_file holds.
+type savedState struct {
+	PausedSince *time.Time `json:"paused_since,omitempty"`
+	Jobs        []*Job     `json:"jobs"`
+}
+
 func (q *receptionQueue) saveLocked() error {
-	raw, err := json.Marshal(q.jobs)
+	st := savedState{Jobs: q.jobs}
+	if !q.pausedSince.IsZero() {
+		st.PausedSince = &q.pausedSince
+	}
+	raw, err := json.Marshal(st)
 	if err != nil {
 		return fmt.Errorf("reception-queue: encode state: %w", err)
 	}
@@ -1095,18 +1221,18 @@ func (q *receptionQueue) pruneLocked() {
 	}
 }
 
-func fillName(v interface{}, name string) interface{} {
+func fillName(v any, name string) any {
 	switch t := v.(type) {
 	case string:
 		return strings.ReplaceAll(t, "{name}", name)
-	case map[string]interface{}:
-		out := make(map[string]interface{}, len(t))
+	case map[string]any:
+		out := make(map[string]any, len(t))
 		for k, val := range t {
 			out[k] = fillName(val, name)
 		}
 		return out
-	case []interface{}:
-		out := make([]interface{}, len(t))
+	case []any:
+		out := make([]any, len(t))
 		for i, val := range t {
 			out[i] = fillName(val, name)
 		}
@@ -1116,7 +1242,7 @@ func fillName(v interface{}, name string) interface{} {
 	}
 }
 
-func parsePolylines(v interface{}) ([][][2]float64, error) {
+func parsePolylines(v any) ([][][2]float64, error) {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -1131,21 +1257,21 @@ func parsePolylines(v interface{}) ([][][2]float64, error) {
 	return out, nil
 }
 
-// polylinesArg converts strokes to the nested []interface{} that DoCommand's
+// polylinesArg converts strokes to the nested []any that DoCommand's
 // protobuf Struct encoding accepts; fixed-size arrays are rejected.
-func polylinesArg(polylines [][][2]float64) []interface{} {
-	out := make([]interface{}, len(polylines))
+func polylinesArg(polylines [][][2]float64) []any {
+	out := make([]any, len(polylines))
 	for i, poly := range polylines {
-		pts := make([]interface{}, len(poly))
+		pts := make([]any, len(poly))
 		for j, p := range poly {
-			pts[j] = []interface{}{p[0], p[1]}
+			pts[j] = []any{p[0], p[1]}
 		}
 		out[i] = pts
 	}
 	return out
 }
 
-func toInt(v interface{}) (int, bool) {
+func toInt(v any) (int, bool) {
 	switch n := v.(type) {
 	case int:
 		return n, true

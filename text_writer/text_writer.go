@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -113,20 +114,20 @@ func (cfg *Config) paper() *drawer.Paper {
 
 // paperPayload is the card as a plain map, which is what a DoCommand carries.
 // Built by hand because r3.Vector has no JSON tags and would come out as X/Y/Z.
-func paperPayload(p *drawer.Paper) (map[string]interface{}, error) {
-	vec := func(v r3.Vector) map[string]interface{} {
-		return map[string]interface{}{"x": v.X, "y": v.Y, "z": v.Z}
+func paperPayload(p *drawer.Paper) (map[string]any, error) {
+	vec := func(v r3.Vector) map[string]any {
+		return map[string]any{"x": v.X, "y": v.Y, "z": v.Z}
 	}
 	raw, err := json.Marshal(p.TopLeftCorner.Orientation)
 	if err != nil {
 		return nil, err
 	}
-	var orientation map[string]interface{}
+	var orientation map[string]any
 	if err := json.Unmarshal(raw, &orientation); err != nil {
 		return nil, err
 	}
-	out := map[string]interface{}{
-		"top_left_corner": map[string]interface{}{
+	out := map[string]any{
+		"top_left_corner": map[string]any{
 			"translation": vec(p.TopLeftCorner.Translation),
 			"orientation": orientation,
 		},
@@ -140,7 +141,7 @@ func paperPayload(p *drawer.Paper) (map[string]interface{}, error) {
 }
 
 type commander interface {
-	DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error)
+	DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error)
 }
 
 type runner func(ctx context.Context, args ...string) ([]byte, error)
@@ -209,7 +210,7 @@ type writeArgs struct {
 	Paper *drawer.Paper `json:"paper,omitempty"`
 }
 
-func parseWriteArgs(payload interface{}) (*writeArgs, error) {
+func parseWriteArgs(payload any) (*writeArgs, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
@@ -281,7 +282,7 @@ func (w *textWriter) buildCLIArgs(a *writeArgs, card *drawer.Paper) []string {
 	return args
 }
 
-func (w *textWriter) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (w *textWriter) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	v, err := verb.Single(cmd)
 	if err != nil {
 		return nil, err
@@ -290,7 +291,7 @@ func (w *textWriter) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 	case "write":
 		return w.write(ctx, cmd["write"])
 	case "status":
-		return map[string]interface{}{"state": "ready"}, nil
+		return map[string]any{"state": "ready"}, nil
 	default:
 		return nil, fmt.Errorf("text-writer: unknown verb %q; expected \"write\" or \"status\"", v)
 	}
@@ -298,7 +299,7 @@ func (w *textWriter) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 
 // write lays the text out and draws it, returning only once the drawer has
 // finished and lifted the pen, which is what the reception queue relies on.
-func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string]interface{}, error) {
+func (w *textWriter) write(ctx context.Context, payload any) (map[string]any, error) {
 	a, err := parseWriteArgs(payload)
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: %w", err)
@@ -311,11 +312,11 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
-	var layout map[string]interface{}
+	var layout map[string]any
 	if err = json.Unmarshal(stdout, &layout); err != nil {
 		return nil, fmt.Errorf("text-writer: parse python output: %w", err)
 	}
-	polylines, ok := layout["polylines"].([]interface{})
+	polylines, ok := layout["polylines"].([]any)
 	if !ok || len(polylines) == 0 {
 		return nil, errors.New("text-writer: python output has no polylines")
 	}
@@ -330,14 +331,14 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
 	w.logger.Infof("text-writer: writing %q, %d strokes", a.Text, len(polylines))
-	draw := map[string]interface{}{"polylines": polylines, "paper": paper}
+	draw := map[string]any{"polylines": polylines, "paper": paper}
 	if w.cfg.StrokeSpeedDegsPerSec > 0 {
 		draw["stroke_speed_degs_per_sec"] = w.cfg.StrokeSpeedDegsPerSec
 	}
 	if w.cfg.StrokeAccelerationDegsPerSecPerSec > 0 {
 		draw["stroke_acceleration_degs_per_sec_per_sec"] = w.cfg.StrokeAccelerationDegsPerSecPerSec
 	}
-	resp, err := w.drawer.DoCommand(ctx, map[string]interface{}{"draw": draw})
+	resp, err := w.drawer.DoCommand(ctx, map[string]any{"draw": draw})
 	if err != nil {
 		return nil, fmt.Errorf("text-writer: draw %q: %w", a.Text, err)
 	}
@@ -346,12 +347,10 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 	if paused, _ := resp["paused"].(bool); paused {
 		return nil, fmt.Errorf("text-writer: drawer was paused while writing %q", a.Text)
 	}
-	for k, v := range resp {
-		layout[k] = v
-	}
+	maps.Copy(layout, resp)
 	return layout, nil
 }
 
-func (w *textWriter) Status(_ context.Context) (map[string]interface{}, error) {
-	return map[string]interface{}{"state": "ready"}, nil
+func (w *textWriter) Status(_ context.Context) (map[string]any, error) {
+	return map[string]any{"state": "ready"}, nil
 }

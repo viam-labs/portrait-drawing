@@ -81,7 +81,7 @@ func (c *ForceGuardConfig) validate(path string, liftOffZMM float64) error {
 }
 
 type positioner interface {
-	SetPosition(ctx context.Context, position uint32, extra map[string]interface{}) error
+	SetPosition(ctx context.Context, position uint32, extra map[string]any) error
 }
 
 type forceGuard struct {
@@ -105,7 +105,7 @@ func (g *forceGuard) limit(clear bool) float64 {
 func (g *forceGuard) measureBaseline(ctx context.Context) (float64, error) {
 	var sum float64
 	lowest, highest := math.Inf(1), math.Inf(-1)
-	for i := 0; i < baselineSamples; i++ {
+	for i := range baselineSamples {
 		if i > 0 {
 			select {
 			case <-ctx.Done():
@@ -172,8 +172,8 @@ func (s *forceStats) mean() float64 {
 	return s.sum / float64(s.samples)
 }
 
-func (s *forceStats) summary() map[string]interface{} {
-	return map[string]interface{}{"mean": s.mean(), "peak": s.peak, "samples": s.samples}
+func (s *forceStats) summary() map[string]any {
+	return map[string]any{"mean": s.mean(), "peak": s.peak, "samples": s.samples}
 }
 
 // forceRun is one draw's baseline and what the force did over it, split the way
@@ -207,8 +207,8 @@ func (r *forceRun) record(clear bool, force float64) {
 	r.stroke.record(force)
 }
 
-func (r *forceRun) summary() map[string]interface{} {
-	out := map[string]interface{}{
+func (r *forceRun) summary() map[string]any {
+	out := map[string]any{
 		"baseline": r.baseline,
 		"pen_down": r.penDown.summary(),
 		"lifted":   r.lifted.summary(),

@@ -7,7 +7,7 @@ import "fmt"
 // Single returns the single verb key in cmd, or an error if cmd doesn't
 // contain exactly one key. Guards against Go's non-deterministic map
 // iteration when a caller sends multiple verbs.
-func Single(cmd map[string]interface{}) (string, error) {
+func Single(cmd map[string]any) (string, error) {
 	if len(cmd) != 1 {
 		return "", fmt.Errorf("expected exactly one verb in DoCommand, got %d", len(cmd))
 	}

@@ -78,19 +78,19 @@ func TestDrawWaypoints_noContactCheckWithoutAMargin(t *testing.T) {
 	}
 }
 
-func guardedDrawer(t *testing.T, force func() (interface{}, error)) (*drawer, *atomic.Int32) {
+func guardedDrawer(t *testing.T, force func() (any, error)) (*drawer, *atomic.Int32) {
 	t.Helper()
 	s := inject.NewSensor("force-1")
-	s.ReadingsFunc = func(context.Context, map[string]interface{}) (map[string]interface{}, error) {
+	s.ReadingsFunc = func(context.Context, map[string]any) (map[string]any, error) {
 		v, err := force()
 		if err != nil {
 			return nil, err
 		}
-		return map[string]interface{}{"Fz": v}, nil
+		return map[string]any{"Fz": v}, nil
 	}
 	stops := &atomic.Int32{}
 	a := inject.NewArm("my-arm")
-	a.StopFunc = func(context.Context, map[string]interface{}) error {
+	a.StopFunc = func(context.Context, map[string]any) error {
 		stops.Add(1)
 		return nil
 	}
@@ -108,14 +108,14 @@ func untilCanceled(ctx context.Context) error {
 }
 
 func TestWatchForce_normalForceLetsTheMoveFinish(t *testing.T) {
-	d, stops := guardedDrawer(t, func() (interface{}, error) { return 3.0, nil })
+	d, stops := guardedDrawer(t, func() (any, error) { return 3.0, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, func(context.Context) error { return nil })
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 }
 
 func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
-	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
+	d, stops := guardedDrawer(t, func() (any, error) { return -7.5, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultPressingHard)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "pressing too hard")
@@ -123,7 +123,7 @@ func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 }
 
 func TestWatchForce_clearMoveUsesTheContactLimit(t *testing.T) {
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return 3.0, nil })
+	d, _ := guardedDrawer(t, func() (any, error) { return 3.0, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, true, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "before the pen")
@@ -131,7 +131,7 @@ func TestWatchForce_clearMoveUsesTheContactLimit(t *testing.T) {
 
 func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
 	// A wrist sensor carrying the tool reads far from zero with nothing touching.
-	d, stops := guardedDrawer(t, func() (interface{}, error) { return -18.4, nil })
+	d, stops := guardedDrawer(t, func() (any, error) { return -18.4, nil })
 	err := d.watchForce(context.Background(), &forceRun{baseline: -18.0}, true, func(context.Context) error { return nil })
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
@@ -142,7 +142,7 @@ func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
 
 func TestForceRun_keepsLiftedAndPenDownApart(t *testing.T) {
 	var reads atomic.Int32
-	d, _ := guardedDrawer(t, func() (interface{}, error) {
+	d, _ := guardedDrawer(t, func() (any, error) {
 		reads.Add(1)
 		return -18.5, nil
 	})
@@ -167,7 +167,7 @@ func TestForceRun_keepsLiftedAndPenDownApart(t *testing.T) {
 }
 
 func TestStatus_reportsTheLastForceRun(t *testing.T) {
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
+	d, _ := guardedDrawer(t, func() (any, error) { return 0.0, nil })
 	_, has := d.status()["last_force"]
 	test.That(t, has, test.ShouldBeFalse)
 
@@ -179,10 +179,10 @@ func TestStatus_reportsTheLastForceRun(t *testing.T) {
 	run.record(false, 2)
 	run.record(false, 4)
 	d.finishForceRun(run)
-	force, ok := d.status()["last_force"].(map[string]interface{})
+	force, ok := d.status()["last_force"].(map[string]any)
 	test.That(t, ok, test.ShouldBeTrue)
 	test.That(t, force["baseline"], test.ShouldEqual, -18.0)
-	penDown, ok := force["pen_down"].(map[string]interface{})
+	penDown, ok := force["pen_down"].(map[string]any)
 	test.That(t, ok, test.ShouldBeTrue)
 	test.That(t, penDown["mean"], test.ShouldEqual, 3.0)
 	test.That(t, penDown["peak"], test.ShouldEqual, 4.0)
@@ -191,7 +191,7 @@ func TestStatus_reportsTheLastForceRun(t *testing.T) {
 
 func TestMeasureBaseline_averagesTheSamples(t *testing.T) {
 	var n atomic.Int32
-	d, _ := guardedDrawer(t, func() (interface{}, error) {
+	d, _ := guardedDrawer(t, func() (any, error) {
 		if n.Add(1)%2 == 0 {
 			return -18.2, nil
 		}
@@ -228,21 +228,21 @@ func TestStillBaseline_givesUpOnASteadyDrift(t *testing.T) {
 }
 
 func TestMeasureBaseline_refusesAFrozenSensor(t *testing.T) {
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
+	d, _ := guardedDrawer(t, func() (any, error) { return 0.0, nil })
 	_, err := d.forceGuard.measureBaseline(context.Background())
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "not streaming")
 }
 
 func TestMeasureBaseline_propagatesReadErrors(t *testing.T) {
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return nil, errors.New("unplugged") })
+	d, _ := guardedDrawer(t, func() (any, error) { return nil, errors.New("unplugged") })
 	_, err := d.forceGuard.measureBaseline(context.Background())
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "unplugged")
 }
 
 func TestWatchForce_unreadableSensorStopsTheMove(t *testing.T) {
-	d, stops := guardedDrawer(t, func() (interface{}, error) { return nil, errors.New("unplugged") })
+	d, stops := guardedDrawer(t, func() (any, error) { return nil, errors.New("unplugged") })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "unplugged")
@@ -251,7 +251,7 @@ func TestWatchForce_unreadableSensorStopsTheMove(t *testing.T) {
 }
 
 func TestWatchForce_nonNumericReadingStopsTheMove(t *testing.T) {
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return "high", nil })
+	d, _ := guardedDrawer(t, func() (any, error) { return "high", nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "not a number")
@@ -286,7 +286,7 @@ func TestStatus_excessForceIsAFaultUntilDrawingRestarts(t *testing.T) {
 
 func TestWatchForce_aFrozenSensorStopsTheMove(t *testing.T) {
 	// Plausible, in range, and exactly the same every time: a stream that stopped.
-	d, stops := guardedDrawer(t, func() (interface{}, error) { return 0.3, nil })
+	d, stops := guardedDrawer(t, func() (any, error) { return 0.3, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
 	var frozen *frozenForceError
 	test.That(t, errors.As(err, &frozen), test.ShouldBeTrue)
@@ -298,7 +298,7 @@ func TestWatchForce_aFrozenSensorStopsTheMove(t *testing.T) {
 
 func TestWatchForce_aLiveSensorIsNotFrozen(t *testing.T) {
 	var n atomic.Int32
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.3 + 0.001*float64(n.Add(1)%3), nil })
+	d, _ := guardedDrawer(t, func() (any, error) { return 0.3 + 0.001*float64(n.Add(1)%3), nil })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(2*frozenPolls)*forcePollInterval)
 	defer cancel()
 	err := d.watchForce(ctx, &forceRun{}, false, untilCanceled)
@@ -307,7 +307,7 @@ func TestWatchForce_aLiveSensorIsNotFrozen(t *testing.T) {
 
 func TestForceRun_countsRepeatsAcrossMoves(t *testing.T) {
 	run := &forceRun{}
-	for i := 0; i < frozenPolls-1; i++ {
+	for range frozenPolls - 1 {
 		run.noteRaw(-12.5)
 	}
 	test.That(t, run.repeats, test.ShouldEqual, frozenPolls-1)
@@ -327,13 +327,13 @@ func TestConfigValidate_retreatPoseInDeps(t *testing.T) {
 
 type fakePositioner struct{ positions []uint32 }
 
-func (f *fakePositioner) SetPosition(_ context.Context, p uint32, _ map[string]interface{}) error {
+func (f *fakePositioner) SetPosition(_ context.Context, p uint32, _ map[string]any) error {
 	f.positions = append(f.positions, p)
 	return nil
 }
 
 func TestPark_goesToTheRetreatPose(t *testing.T) {
-	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
+	d, _ := guardedDrawer(t, func() (any, error) { return 0.0, nil })
 	pos := &fakePositioner{}
 	d.forceGuard.retreat = pos
 	d.cfg = &Config{ForceGuard: &ForceGuardConfig{RetreatPose: "mat-view"}}
@@ -404,7 +404,7 @@ func TestConfigValidate_lineTolerance(t *testing.T) {
 }
 
 func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T) {
-	limits, err := parseStrokeLimits(map[string]interface{}{"polylines": []interface{}{}, "stroke_speed_degs_per_sec": 15.0})
+	limits, err := parseStrokeLimits(map[string]any{"polylines": []any{}, "stroke_speed_degs_per_sec": 15.0})
 	test.That(t, err, test.ShouldBeNil)
 	got := limits.or(strokeLimits{speed: 30, acceleration: 120})
 	test.That(t, got, test.ShouldResemble, strokeLimits{speed: 15, acceleration: 120})
@@ -413,7 +413,7 @@ func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T)
 	test.That(t, opts.MaxAccRads, test.ShouldAlmostEqual, 120*math.Pi/180)
 	test.That(t, strokeLimits{}.moveOptions(), test.ShouldBeNil)
 
-	_, err = parseStrokeLimits(map[string]interface{}{"stroke_speed_degs_per_sec": -1.0})
+	_, err = parseStrokeLimits(map[string]any{"stroke_speed_degs_per_sec": -1.0})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
