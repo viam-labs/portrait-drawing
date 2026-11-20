@@ -203,6 +203,30 @@ func TestMeasureBaseline_averagesTheSamples(t *testing.T) {
 	test.That(t, n.Load(), test.ShouldEqual, baselineSamples)
 }
 
+func TestStillBaseline_waitsOutADrift(t *testing.T) {
+	var n atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) {
+		i := n.Add(1)
+		// Drifts 0.05 N a sample for the first 40, then holds with noise.
+		v := -18.0 + 0.05*math.Min(float64(i), 40)
+		if i%2 == 0 {
+			v += 0.02
+		}
+		return v, nil
+	})
+	baseline, err := d.stillBaseline(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, baseline, test.ShouldAlmostEqual, -16.0, 0.05)
+}
+
+func TestStillBaseline_givesUpOnASteadyDrift(t *testing.T) {
+	var n atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.05 * float64(n.Add(1)), nil })
+	_, err := d.stillBaseline(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "kept drifting")
+}
+
 func TestMeasureBaseline_refusesAFrozenSensor(t *testing.T) {
 	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
 	_, err := d.forceGuard.measureBaseline(context.Background())
@@ -375,7 +399,7 @@ func TestConfigValidate_lineTolerance(t *testing.T) {
 }
 
 func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T) {
-	limits, park, err := parseDrawOptions(map[string]interface{}{"polylines": []interface{}{}, "stroke_speed_degs_per_sec": 15.0})
+	limits, err := parseStrokeLimits(map[string]interface{}{"polylines": []interface{}{}, "stroke_speed_degs_per_sec": 15.0})
 	test.That(t, err, test.ShouldBeNil)
 	got := limits.or(strokeLimits{speed: 30, acceleration: 120})
 	test.That(t, got, test.ShouldResemble, strokeLimits{speed: 15, acceleration: 120})
@@ -383,13 +407,8 @@ func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T)
 	test.That(t, opts.MaxVelRads, test.ShouldAlmostEqual, 15*math.Pi/180)
 	test.That(t, opts.MaxAccRads, test.ShouldAlmostEqual, 120*math.Pi/180)
 	test.That(t, strokeLimits{}.moveOptions(), test.ShouldBeNil)
-	test.That(t, park, test.ShouldBeFalse)
 
-	_, park, err = parseDrawOptions(map[string]interface{}{"finish_at_retreat_pose": true})
-	test.That(t, err, test.ShouldBeNil)
-	test.That(t, park, test.ShouldBeTrue)
-
-	_, _, err = parseDrawOptions(map[string]interface{}{"stroke_speed_degs_per_sec": -1.0})
+	_, err = parseStrokeLimits(map[string]interface{}{"stroke_speed_degs_per_sec": -1.0})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 

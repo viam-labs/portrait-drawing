@@ -179,6 +179,8 @@ func (s *forceStats) summary() map[string]interface{} {
 type forceRun struct {
 	baseline        float64
 	lifted, penDown forceStats
+	// stroke is the current pen-down move's share of penDown.
+	stroke forceStats
 	// last and repeats track identical raw readings across moves, since a
 	// frozen sensor stays frozen from one move to the next.
 	last    float64
@@ -200,6 +202,7 @@ func (r *forceRun) record(clear bool, force float64) {
 		return
 	}
 	r.penDown.record(force)
+	r.stroke.record(force)
 }
 
 func (r *forceRun) summary() map[string]interface{} {

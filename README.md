@@ -59,6 +59,7 @@ DoCommand, no image data passing through your hands.
 | `line_tolerance_mm` | number | no | How far a pen-on-paper move may stray from its straight line, up and down included. Default 0.5; a rigid pen needs about 0.05. |
 | `stroke_speed_degs_per_sec`, `stroke_acceleration_degs_per_sec_per_sec` | number | no | Cap the arm while the pen is on the paper or going onto it; travel between strokes runs at the arm's own. A `draw` may carry its own. |
 | `touch_off` | object | no | Find the paper by touching it before each drawing. See [Finding the paper by touch](#finding-the-paper-by-touch). |
+| `pen_force` | object | no | Keep each stroke's force in a range by adjusting the pen's depth as it draws. See [`pen_force`](#pen_force). |
 
 Each stroke, from pen-down through its last point to pen-up, is planned and run
 as one motion, so the arm moves through its points without stopping at each.
@@ -146,7 +147,7 @@ before the pen is all the way down, and it pushes back harder once it is there.
 | `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units, measured from the baseline below. Set it a little above the most you see in a normal drawing. |
 | `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
 | `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
-| `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off. Without it the arm goes to `home_pose`. |
+| `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off, and after every finished drawing, so the sheet can be taken. Without it the arm goes to `home_pose`. |
 
 A wrist sensor reads the weight of the pen holder and its own bias even with
 nothing touching — tens of newtons is normal. So every draw and every `resume`
@@ -218,16 +219,40 @@ sheet keeps its plane.
 
 It needs `force_guard`. The arm crosses between touches 40 mm above the paper
 and comes straight down to each, since a free move that also descends can dip
-below its end on the way. Every move down is guarded as in a drawing, so a capped
+below its end on the way. It zeroes the force only once two readings in a row
+agree, since the reading drifts for a moment after that drop. Every move down is guarded as in a drawing, so a capped
 pen meets the paper on its way to the start of a touch and trips there; the lift
 after each touch is not, since moving away can only ease the force. A touch that
 feels nothing, or a plane steeper than 1 mm per 100 mm, fails the drawing. The
 log reports each touch and the plane's slope.
 
+### `pen_force`
+
+Touch-off puts the pen at the right depth to start with; `pen_force` keeps it
+there. After each stroke the drawer averages the force over it. Below `min`, the
+pen goes `step_mm` deeper for the strokes that follow and the stroke is drawn
+once more; above `max`, it goes `step_mm` shallower. One stroke's average holds
+hundreds of readings, so it sees past the 1–3 N jolts of a moving arm that no
+single reading can. Strokes too short to judge pool with the next. Where the
+pen ended up carries into the next drawing.
+
+```json
+"pen_force": { "min": 1.2, "max": 3.0 }
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `min`, `max` | number | yes | The range a stroke's mean force over the baseline must stay in. A moving arm reads about 0.8 N with the pen in the air, so `min` goes above that. `max` must be below `force_guard.max_force`. |
+| `step_mm` | number | no | How far the pen moves after a stroke out of range. Default 0.1. |
+| `max_adjust_mm` | number | no | The most it moves either way in all. Default 1. |
+
+It needs `force_guard`. The log reports each stroke out of range and, at the
+end, where the pen finished and how many strokes were drawn again.
+
 ### The rest pose
 
 `home_pose` is where the arm lives between drawings: it returns there when a
-drawing finishes or pauses, `go_home` sends it there, and `capture_and_draw`
+drawing pauses, or finishes without a `force_guard.retreat_pose`, `go_home` sends it there, and `capture_and_draw`
 moves there before triggering the photo so the arm is out of the camera's view.
 Teach it by jogging the arm to where it should park and copying the tool pose
 from the arm's card in the app:
@@ -358,10 +383,6 @@ without the `paper_` prefix:
 
 This is how the [`text-writer`](#viamportrait-drawingtext-writer) puts a name
 on a card beside the portrait paper.
-
-`"finish_at_retreat_pose": true` ends the drawing at `force_guard.retreat_pose`,
-where a person can take the sheet, instead of at `home_pose`. Without a
-`retreat_pose` the arm goes home as usual.
 
 ### `status`
 
@@ -561,8 +582,7 @@ drawer's `draw` verb accepts.
 Writes a line of text on a card — a name on a name tag — through a drawer. It
 lays the text out as polylines in card-local mm, hands them to the drawer's
 `draw` verb along with where the card is, and returns when the drawer does,
-pen up. The drawer finishes each name at its `force_guard.retreat_pose`, so the
-card is within reach, or at `home_pose` without one. That blocking contract is what the reception queue's `name_tag_writer`
+pen up. That blocking contract is what the reception queue's `name_tag_writer`
 expects, so this service is the one to name there.
 
 The card is the writer's own surface. The drawer's paper stays where portraits

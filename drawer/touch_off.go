@@ -28,8 +28,12 @@ const (
 	defaultPressMM = 0.2
 	// touchSettle lets the arm stop ringing before a step's force is read: a
 	// reading taken while it still moves is the arm, not the paper.
-	touchSettle        = 100 * time.Millisecond
-	touchReadings      = 3
+	touchSettle   = 100 * time.Millisecond
+	touchReadings = 3
+	// stillBaselineN is how closely consecutive baselines must agree, well
+	// under touch_off.force.
+	stillBaselineN     = 0.1
+	maxBaselineTries   = 10
 	minTouchSpreadMM   = 20.0
 	maxTouchTiltPer1mm = 0.01
 )
@@ -221,7 +225,7 @@ func (d *drawer) touchOne(
 	if err := move(start, true, true); err != nil {
 		return 0, err
 	}
-	baseline, err := d.forceGuard.measureBaseline(ctx)
+	baseline, err := d.stillBaseline(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -254,6 +258,27 @@ func (d *drawer) touchOne(
 	}
 	lift()
 	return 0, fmt.Errorf("felt nothing down to %.1f mm below the paper's configured height; is there paper there?", cfg.MaxDepthMM)
+}
+
+// stillBaseline measures until two baselines in a row agree. After the long
+// straight drop to a touch the reading keeps drifting for a while, and a
+// baseline taken during it read paper 0.8 mm before the pen reached it.
+func (d *drawer) stillBaseline(ctx context.Context) (float64, error) {
+	prev, err := d.forceGuard.measureBaseline(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < maxBaselineTries; i++ {
+		cur, err := d.forceGuard.measureBaseline(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if math.Abs(cur-prev) <= stillBaselineN {
+			return cur, nil
+		}
+		prev = cur
+	}
+	return 0, fmt.Errorf("the force reading kept drifting by more than %g N with the arm still", stillBaselineN)
 }
 
 // settledForce waits for the arm to stop ringing, then averages a few readings

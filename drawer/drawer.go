@@ -82,6 +82,7 @@ type Config struct {
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 	ForceGuard         *ForceGuardConfig                          `json:"force_guard,omitempty"`
 	TouchOff           *TouchOffConfig                            `json:"touch_off,omitempty"`
+	PenForce           *PenForceConfig                            `json:"pen_force,omitempty"`
 	// StrokeSpeedDegsPerSec and StrokeAccelerationDegsPerSecPerSec cap the arm
 	// while the pen is on the paper or going onto it; travel between strokes
 	// runs at the arm's own. A draw may carry its own. 0 leaves the arm's.
@@ -153,9 +154,6 @@ type surface struct {
 	// stroke caps the arm on the paper, in degrees; held with the surface so a
 	// drawing resumes at the speed it started at.
 	stroke strokeLimits
-	// park sends the arm to force_guard.retreat_pose when the drawing is done,
-	// rather than to home_pose.
-	park bool
 }
 
 type strokeLimits struct{ speed, acceleration float64 }
@@ -266,6 +264,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 			return nil, nil, err
 		}
 	}
+	if cfg.PenForce != nil {
+		if err := cfg.PenForce.validate(cfg.ForceGuard); err != nil {
+			return nil, nil, err
+		}
+	}
 	if cfg.ForceGuard != nil {
 		liftOff := cfg.LiftOffZMM
 		if liftOff == 0 {
@@ -314,6 +317,9 @@ type drawer struct {
 	// touched is the paper the last touch-off measured, kept so a drawing that
 	// resumes on the same sheet does not touch it off again.
 	touched *touchedPaper
+	// penOffset is where pen_force left the pen's depth, carried into the next
+	// drawing so it does not start over.
+	penOffset float64
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -544,29 +550,25 @@ type drawArgs struct {
 	// configured caps for this drawing.
 	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
 	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
-	// FinishAtRetreatPose ends the drawing at force_guard.retreat_pose, where a
-	// person can take the sheet, instead of at home_pose.
-	FinishAtRetreatPose bool `json:"finish_at_retreat_pose,omitempty"`
 }
 
 func (d *drawer) configuredStroke() strokeLimits {
 	return strokeLimits{speed: d.cfg.StrokeSpeedDegsPerSec, acceleration: d.cfg.StrokeAccelerationDegsPerSecPerSec}
 }
 
-func parseDrawOptions(payload interface{}) (strokeLimits, bool, error) {
+func parseStrokeLimits(payload interface{}) (strokeLimits, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return strokeLimits{}, false, fmt.Errorf("marshal payload: %w", err)
+		return strokeLimits{}, fmt.Errorf("marshal payload: %w", err)
 	}
 	var args drawArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return strokeLimits{}, false, fmt.Errorf("parse payload: %w", err)
+		return strokeLimits{}, fmt.Errorf("parse payload: %w", err)
 	}
 	if args.StrokeSpeedDegsPerSec < 0 || args.StrokeAccelerationDegsPerSecPerSec < 0 {
-		return strokeLimits{}, false, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
+		return strokeLimits{}, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
 	}
-	limits := strokeLimits{speed: args.StrokeSpeedDegsPerSec, acceleration: args.StrokeAccelerationDegsPerSecPerSec}
-	return limits, args.FinishAtRetreatPose, nil
+	return strokeLimits{speed: args.StrokeSpeedDegsPerSec, acceleration: args.StrokeAccelerationDegsPerSecPerSec}, nil
 }
 
 func parseDrawPayload(payload interface{}) ([]Polyline, int, *Paper, error) {
@@ -1056,12 +1058,11 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 			return nil, fmt.Errorf("drawer: %w", err)
 		}
 	}
-	limits, park, err := parseDrawOptions(payload)
+	limits, err := parseStrokeLimits(payload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
 	paper.stroke = limits.or(d.configuredStroke())
-	paper.park = park
 	ctx, release, err := d.acquireDrawSlot(parent)
 	if err != nil {
 		return nil, err
@@ -1124,9 +1125,11 @@ type waypoint struct {
 
 // drawMove is one planned, uninterrupted motion through one or more points.
 type drawMove struct {
-	points       []r3.Vector
-	linear       bool
-	clear        bool
+	points []r3.Vector
+	linear bool
+	clear  bool
+	// stroke is pen-down through pen-up, the moves pen_force judges.
+	stroke       bool
 	endsPolyline bool
 	label        string
 }
@@ -1152,6 +1155,7 @@ func strokeMoves(wps []waypoint) []drawMove {
 			linear: wp.linear, clear: wp.clear, endsPolyline: wp.endsPolyline, label: wp.label,
 		}
 		if wp.contact {
+			mv.stroke = true
 			mv.label = strings.TrimSuffix(wp.label, " pen-down") + " stroke"
 			for i+1 < len(wps) && (wps[i+1].contact || wps[i+1].endsPolyline) {
 				i++
@@ -1296,14 +1300,29 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		onPlane(waypoints, plane, zDown, d.cfg.TouchOff.withDefaults().pressMM())
 	}
 
-	for _, mv := range strokeMoves(waypoints) {
+	var pf *penForce
+	if d.cfg.PenForce != nil && d.forceGuard != nil {
+		pf = &penForce{cfg: d.cfg.PenForce.withDefaults(), offset: d.penOffset}
+		defer d.finishPenForce(pf)
+	}
+	moves := strokeMoves(waypoints)
+	polyStart, redrawn := -1, false
+	for m := 0; m < len(moves); m++ {
+		mv := moves[m]
+		if (m == 0 || moves[m-1].endsPolyline) && m != polyStart {
+			polyStart, redrawn = m, false
+		}
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
 		targets := make([]spatialmath.Pose, len(mv.points))
 		for i, p := range mv.points {
+			if pf != nil && mv.stroke && (!mv.endsPolyline || i != len(mv.points)-1) {
+				p.Z += pf.offset
+			}
 			targets[i] = spatialmath.NewPose(p, orientation)
 		}
+		run.stroke = forceStats{}
 		var options *arm.MoveOptions
 		if mv.linear {
 			options = paper.stroke.moveOptions()
@@ -1325,6 +1344,20 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 				d.setFailed(wrapped)
 			}
 			return nil, wrapped
+		}
+		if pf != nil && mv.stroke {
+			before := pf.offset
+			verdict := pf.judge(run.stroke)
+			if verdict == penLight || verdict == penHeavy {
+				d.logger.Infof("drawer: %s mean force %.2f N, outside %g–%g; pen now %+.2f mm",
+					mv.label, run.stroke.mean(), pf.cfg.Min, pf.cfg.Max, pf.offset)
+			}
+			if verdict == penLight && !redrawn && pf.offset != before && run.stroke.samples >= minPenForceSamples {
+				redrawn = true
+				pf.redrawn++
+				m = polyStart - 1
+				continue
+			}
 		}
 		if !mv.endsPolyline {
 			continue
@@ -1359,16 +1392,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	d.logger.Infof("drawer: finished %d polylines in %s", len(polylines), time.Since(startedAt).Round(time.Second))
 	d.hold(nil, 0, surface{})
 
-	if paper.park {
-		if err := d.park(ctx, fs); err != nil {
-			d.setFailed(err)
-			return nil, fmt.Errorf("drawer: park: %w", err)
-		}
-	} else if d.hasRestPose() {
-		if err := d.goToRestPose(ctx, fs); err != nil {
-			d.setFailed(err)
-			return nil, fmt.Errorf("drawer: return to rest pose: %w", err)
-		}
+	// park: a finished sheet is taken away by hand, so the arm waits where a
+	// person can reach it.
+	if err := d.park(ctx, fs); err != nil {
+		d.setFailed(err)
+		return nil, fmt.Errorf("drawer: park: %w", err)
 	}
 	d.setPhase(phaseDone)
 

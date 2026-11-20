@@ -242,7 +242,6 @@ func TestWriteCarriesItsStrokeSpeed(t *testing.T) {
 	draw := fake.cmds[0]["draw"].(map[string]interface{})
 	test.That(t, draw["stroke_speed_degs_per_sec"], test.ShouldEqual, 15.0)
 	test.That(t, draw["stroke_acceleration_degs_per_sec_per_sec"], test.ShouldEqual, 60.0)
-	test.That(t, draw["finish_at_retreat_pose"], test.ShouldBeTrue)
 
 	_, _, err = (&Config{Drawer: "d", PaperTopLeftCorner: card(), PaperWidthMM: 1, PaperHeightMM: 1, StrokeSpeedDegsPerSec: -1}).Validate("")
 	test.That(t, err, test.ShouldNotBeNil)
