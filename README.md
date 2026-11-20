@@ -738,6 +738,23 @@ the letter, and nothing starts until `resume`.
   paused, so it never fights a job for the arm.
 - **The pause is saved**, so a restart stays paused.
 
+The queue also pauses itself when the drawer's
+[`force_guard`](#a-cap-left-on-the-marker) stops a job, since every job after it
+would only trip the guard again. After any failed job it reads the drawer's
+`status`; if that names a `fault`, the job is handled as if `pause` had stopped
+it instead of being failed: a card goes back to the front, a portrait resumes by
+redrawing the stroke that tripped. Other failures still fail the job and the
+queue carries on.
+
+`status.paused.reason` says why the queue is paused, and `error` carries the
+drawer's message for a fault pause:
+
+| `reason` | Paused by | What to do before `resume` |
+|---|---|---|
+| `operator` | `pause` | Whatever it was paused for. |
+| `excess_force` | the force guard, before the pen reached the paper | Take the cap off the marker. |
+| `pressing_too_hard` | the force guard, with the pen on the paper | Check the sheet is lying flat and the paper height is right. |
+
 ### Behavior and caveats
 
 - **Cards first.** A waiting name tag or text job always runs before any
@@ -776,7 +793,7 @@ the letter, and nothing starts until `resume`.
 | `enqueue_portrait` | `{"name": "Ada", "visitor": {…}}`, plus `"image_b64": "…"` to send the photo instead of reading `photo` | `{"job_id", "position"}` |
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
 | `enqueue_text` | `{"text": "Welcome", "cap_height_mm": 12, "fill": 0.6, "visitor": {…}}`; sent to the writer as `{"write": {"text", "cap_height_mm", "fill"}}`, bypassing `name_tag_command` | `{"job_id", "position"}` |
-| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary, `paused: {"since"}` while paused, and `needs_paper` while jobs wait for a sheet |
+| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary, `paused: {"since", "reason", "error"}` while paused (see [Pausing](#pausing)), and `needs_paper` while jobs wait for a sheet |
 | `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits, `text` for text jobs |
 | `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or card is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
