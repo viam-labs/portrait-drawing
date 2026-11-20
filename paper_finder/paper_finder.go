@@ -403,7 +403,7 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 		}
 		out, reason := f.place(s, near)
 		if reason != "" {
-			rejected = append(rejected, map[string]interface{}{"kind": s.Kind, "reason": reason, "corners_px": s.CornersPx})
+			rejected = append(rejected, map[string]interface{}{"kind": s.Kind, "reason": reason, "corners_px": pixelList(s.CornersPx)})
 			continue
 		}
 		if s.Used && !a.IncludeUsed {
@@ -463,6 +463,16 @@ func (f *paperFinder) look(ctx context.Context) (map[string]interface{}, error) 
 	return found, nil
 }
 
+// pixelList is pts as a DoCommand response can carry them: structpb takes
+// slices, not fixed-size arrays.
+func pixelList(pts [][2]float64) []interface{} {
+	out := make([]interface{}, len(pts))
+	for i, p := range pts {
+		out[i] = []interface{}{p[0], p[1]}
+	}
+	return out
+}
+
 // place turns a sheet's pixel corners into arm coordinates and a drawer paper
 // payload, or says why it is not a sheet this finder should draw on.
 func (f *paperFinder) place(s pySheet, near r3.Vector) (map[string]interface{}, string) {
@@ -505,7 +515,7 @@ func (f *paperFinder) place(s pySheet, near r3.Vector) (map[string]interface{}, 
 		"center":      vec(r3.Vector{X: centre.X, Y: centre.Y, Z: z}),
 		"distance_mm": math.Hypot(centre.X-near.X, centre.Y-near.Y),
 		"measured_mm": []float64{measuredW, measuredH},
-		"corners_px":  s.CornersPx,
+		"corners_px":  pixelList(s.CornersPx),
 		"paper": map[string]interface{}{
 			"top_left_corner":  map[string]interface{}{"translation": vec(tl), "orientation": f.orientation},
 			"top_right_corner": vec(tr),

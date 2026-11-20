@@ -3,6 +3,7 @@ package paperfinder
 import (
 	"context"
 	"encoding/json"
+	"go.viam.com/utils/protoutils"
 	"os"
 	"path/filepath"
 	"testing"
@@ -338,4 +339,25 @@ func TestFind_showsTheViewToo(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	// The fake output carries no image, so there is nothing to show.
 	test.That(t, len(view.cmds), test.ShouldEqual, 0)
+}
+
+// Each response goes back over gRPC as a structpb.Struct, which refuses Go's
+// fixed-size arrays: find reached the wire only to fail there.
+func TestResponsesSurviveTheWire(t *testing.T) {
+	sheets := sheetJSON(t, cardAt(400, 200, false), cardAt(0, 0, false))
+	f, _, _, _, _ := newTestFinder(t, calibrationConfig(), map[string]string{
+		"sheets": sheets, "crosses": `{"crosses":[[1,2],[3,4]]}`, "fit": fitOK,
+	})
+	f.cal = &halfScale
+	for _, cmd := range []map[string]interface{}{
+		{"find": map[string]interface{}{"include_used": true}},
+		{"look": map[string]interface{}{}},
+		{"calibrate": map[string]interface{}{"redraw": false}},
+		{"status": map[string]interface{}{}},
+	} {
+		out, err := f.DoCommand(context.Background(), cmd)
+		test.That(t, err, test.ShouldBeNil)
+		_, err = protoutils.StructToStructPb(out)
+		test.That(t, err, test.ShouldBeNil)
+	}
 }
