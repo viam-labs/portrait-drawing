@@ -38,6 +38,10 @@ type fakeDrawer struct {
 	calls      []string
 	draws      []map[string]any
 	failOnDraw error
+	// trip, when set, ends the draw in progress with it at the next step, like
+	// the force guard stopping the arm; fault is what status then reports.
+	trip  error
+	fault string
 	// pauseGate, when set, holds a pause call back until it is closed, like a
 	// pause still in flight.
 	pauseGate chan struct{}
@@ -69,6 +73,12 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 			defer func() { f.stopped <- struct{}{} }()
 			for {
 				f.mu.Lock()
+				if f.trip != nil {
+					f.running = false
+					err := f.trip
+					f.mu.Unlock()
+					return nil, err
+				}
 				if f.done >= f.total {
 					f.running = false
 					f.mu.Unlock()
@@ -116,7 +126,12 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 		case "status":
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			return map[string]any{"polylines_done": float64(f.done)}, nil
+			st := map[string]any{"polylines_done": float64(f.done)}
+			if f.fault != "" {
+				st["fault"] = f.fault
+				st["last_error"] = "drawer: take the cap off the marker, then resume"
+			}
+			return st, nil
 		case "cancel":
 			return map[string]any{"canceled": true}, nil
 		case "go_home":
@@ -141,15 +156,20 @@ type fakeWriter struct {
 	wrote chan string
 	// block keeps the writer writing until its context ends.
 	block bool
+	// fail, when set, is the error every write returns.
+	fail error
 }
 
 func (w *fakeWriter) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	w.mu.Lock()
 	w.cmds = append(w.cmds, cmd)
-	block := w.block
+	block, fail := w.block, w.fail
 	w.mu.Unlock()
 	text := cmd["write"].(map[string]any)["text"].(string)
 	w.wrote <- text
+	if fail != nil {
+		return nil, fail
+	}
 	if block {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -391,6 +411,8 @@ func TestFailedPortraitCanBeRetriedFromWhereItStopped(t *testing.T) {
 	h.waitState(t, id, stateFailed)
 	s, _ := h.q.jobSummary(id)
 	test.That(t, s["error"], test.ShouldContainSubstring, "no plan")
+	// Without a fault from the force guard, a failure does not pause the queue.
+	test.That(t, h.q.status()["paused"], test.ShouldBeNil)
 
 	h.drawer.mu.Lock()
 	h.drawer.failOnDraw = nil
@@ -989,7 +1011,7 @@ func TestPauseStopsAPortraitMidStrokeAndItResumesFromThatStroke(t *testing.T) {
 	h.drawer.step(t)
 
 	resp := h.do(t, "pause")
-	test.That(t, resp["paused"], test.ShouldNotBeNil)
+	test.That(t, resp["paused"].(map[string]any)["reason"], test.ShouldEqual, pauseByOperator)
 	test.That(t, h.drawerCalled("cancel"), test.ShouldBeTrue)
 	h.waitState(t, id, statePaused)
 
@@ -1065,8 +1087,101 @@ func TestAPauseSurvivesARestart(t *testing.T) {
 	test.That(t, q.load(), test.ShouldBeNil)
 	q.start()
 	defer func() { test.That(t, q.Close(context.Background()), test.ShouldBeNil) }()
-	test.That(t, q.status()["paused"], test.ShouldNotBeNil)
+	test.That(t, q.status()["paused"].(map[string]any)["reason"], test.ShouldEqual, pauseByOperator)
 	expectNothingWritten(t, writer)
+}
+
+var errCapped = errors.New("force guard tripped")
+
+func pausedFor(t *testing.T, h *harness) map[string]any {
+	t.Helper()
+	paused, ok := h.q.status()["paused"].(map[string]any)
+	if !ok {
+		t.Fatal("queue is not paused")
+	}
+	return paused
+}
+
+func TestACappedPenPausesThePortraitAndItResumesFromThatStroke(t *testing.T) {
+	h := newHarness(t)
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.waitDrawing(t)
+	h.drawer.step(t)
+	h.drawer.step(t)
+	h.drawer.mu.Lock()
+	h.drawer.trip, h.drawer.fault = errCapped, "excess_force"
+	h.drawer.mu.Unlock()
+	h.drawer.step(t)
+	h.waitState(t, id, statePaused)
+
+	paused := pausedFor(t, h)
+	test.That(t, paused["reason"], test.ShouldEqual, "excess_force")
+	test.That(t, paused["error"], test.ShouldContainSubstring, "take the cap off")
+	s, err := h.q.jobSummary(id)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["error"], test.ShouldBeNil)
+	// Nothing else starts until a person takes the cap off and resumes.
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	expectNothingWritten(t, h.writer)
+
+	h.drawer.mu.Lock()
+	h.drawer.trip, h.drawer.fault = nil, ""
+	h.drawer.mu.Unlock()
+	resp := h.do(t, "resume")
+	test.That(t, resp["paused"], test.ShouldBeNil)
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.drawUntil(t, id, stateDone)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, h.drawer.starts, test.ShouldResemble, []int{0, 3})
+}
+
+func TestACappedPenOnANameTagPausesAndItGoesFirstOnResume(t *testing.T) {
+	h := newHarness(t)
+	h.writer.fail = errCapped
+	h.drawer.fault = "excess_force"
+	h.do(t, "pause")
+	ada := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Grace"})
+	h.q.start()
+	h.do(t, "resume")
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	deadline := time.Now().Add(2 * time.Second)
+	for h.q.status()["paused"] == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	test.That(t, pausedFor(t, h)["reason"], test.ShouldEqual, "excess_force")
+	s, err := h.q.jobSummary(ada)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["state"], test.ShouldEqual, stateQueued)
+	test.That(t, s["position"], test.ShouldEqual, 1)
+	test.That(t, s["error"], test.ShouldBeNil)
+	expectNothingWritten(t, h.writer)
+
+	h.writer.mu.Lock()
+	h.writer.fail = nil
+	h.writer.mu.Unlock()
+	h.drawer.mu.Lock()
+	h.drawer.fault = ""
+	h.drawer.mu.Unlock()
+	h.do(t, "resume")
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Grace")
+}
+
+func TestAFaultPauseSurvivesARestart(t *testing.T) {
+	h := newHarness(t)
+	h.q.mu.Lock()
+	h.q.pauseForFaultLocked("excess_force", "take the cap off")
+	test.That(t, h.q.saveLocked(), test.ShouldBeNil)
+	h.q.mu.Unlock()
+
+	q := newWithClients(generic.Named("queue"), logging.NewTestLogger(t), newFakeDrawer(), &fakeGenerator{}, &fakeWriter{}, &Config{}, h.state)
+	test.That(t, q.load(), test.ShouldBeNil)
+	paused := q.status()["paused"].(map[string]any)
+	test.That(t, paused["reason"], test.ShouldEqual, "excess_force")
+	test.That(t, paused["error"], test.ShouldEqual, "take the cap off")
 }
 
 type fakeFeeder struct {

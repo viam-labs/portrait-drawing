@@ -53,6 +53,10 @@ const (
 	stateFailed   = "failed"
 	stateCanceled = "canceled"
 
+	// pauseByOperator is the pause reason for a pause someone asked for. A
+	// pause the force guard caused takes the drawer's fault as its reason.
+	pauseByOperator = "operator"
+
 	defaultPaperWidthMM  = 101.6
 	defaultPaperHeightMM = 152.4
 	defaultMarginMM      = 8.0
@@ -253,8 +257,13 @@ type receptionQueue struct {
 	// cancelActive ends the context of the job being drawn or written, so
 	// cancel_job and pause can stop it.
 	cancelActive context.CancelFunc
-	// pausedSince is when an operator paused the queue; nothing starts until resume.
+	// pausedSince is when the queue was paused; nothing starts until resume.
 	pausedSince time.Time
+	// pauseReason is why: pauseByOperator, or the drawer's force-guard fault
+	// (excess_force for a capped pen, pressing_too_hard) that paused it.
+	pauseReason string
+	// pauseError is the drawer's error for a fault pause, which says what to fix.
+	pauseError string
 	// pauseInterrupted is the job pause stopped mid-draw, so it is put back
 	// rather than failed.
 	pauseInterrupted *Job
@@ -654,7 +663,11 @@ func (q *receptionQueue) status() map[string]any {
 	}
 	out := map[string]any{"active": active, "waiting": waiting, "finished": finished}
 	if !q.pausedSince.IsZero() {
-		out["paused"] = map[string]any{"since": q.pausedSince.UTC().Format(time.RFC3339)}
+		paused := map[string]any{"since": q.pausedSince.UTC().Format(time.RFC3339), "reason": q.pauseReason}
+		if q.pauseError != "" {
+			paused["error"] = q.pauseError
+		}
+		out["paused"] = paused
 	}
 	if len(q.needsPaper) > 0 {
 		needs := []any{}
@@ -680,7 +693,7 @@ func (q *receptionQueue) status() map[string]any {
 func (q *receptionQueue) pause(ctx context.Context) (map[string]any, error) {
 	q.mu.Lock()
 	if q.pausedSince.IsZero() {
-		q.pausedSince = time.Now()
+		q.pausedSince, q.pauseReason, q.pauseError = time.Now(), pauseByOperator, ""
 	}
 	for _, j := range q.jobs {
 		if j.State == stateActive {
@@ -709,7 +722,7 @@ func (q *receptionQueue) pause(ctx context.Context) (map[string]any, error) {
 func (q *receptionQueue) resume() (map[string]any, error) {
 	q.mu.Lock()
 	wasPaused := !q.pausedSince.IsZero()
-	q.pausedSince = time.Time{}
+	q.pausedSince, q.pauseReason, q.pauseError = time.Time{}, "", ""
 	q.needsPaper = map[string]*paperWait{}
 	err := q.saveLocked()
 	q.mu.Unlock()
@@ -745,6 +758,33 @@ func (q *receptionQueue) takePauseInterruptLocked(job *Job) bool {
 	}
 	q.pauseInterrupted = nil
 	return true
+}
+
+// drawerFault asks the drawer why its last draw failed, and returns the fault
+// it names: a failure a person has to clear, such as a cap left on the pen.
+// It is "" for any other failure, or when the drawer cannot be asked. message
+// is the drawer's own error, which says what to fix, falling back to err.
+func (q *receptionQueue) drawerFault(ctx context.Context, err error) (fault, message string) {
+	st, serr := q.drawer.DoCommand(ctx, map[string]any{"status": map[string]any{}})
+	if serr != nil {
+		q.logger.Warnf("reception-queue: read drawer fault: %v", serr)
+		return "", ""
+	}
+	fault, _ = st["fault"].(string)
+	if message, _ = st["last_error"].(string); message == "" {
+		message = err.Error()
+	}
+	return fault, message
+}
+
+// pauseForFaultLocked pauses the queue for a fault the drawer's force guard
+// found. Every job after it would only trip the guard again, so they wait for a
+// person to fix it and resume. A pause already in place keeps its reason.
+func (q *receptionQueue) pauseForFaultLocked(fault, message string) {
+	if !q.pausedSince.IsZero() {
+		return
+	}
+	q.pausedSince, q.pauseReason, q.pauseError = time.Now(), fault, message
 }
 
 // requeueFirstLocked puts a card pause interrupted back at the front of the
@@ -1076,6 +1116,16 @@ func (q *receptionQueue) runCard(ctx context.Context, job *Job) {
 	case ctx.Err() != nil:
 		q.finish(job, stateFailed, errors.New(interruptedCard))
 	case err != nil:
+		// The writer draws through the drawer, so a force-guard stop shows there.
+		if fault, message := q.drawerFault(ctx, err); fault != "" {
+			q.mu.Lock()
+			q.pauseForFaultLocked(fault, message)
+			q.requeueFirstLocked(job)
+			q.mu.Unlock()
+			q.logger.Warnf("reception-queue: %s %s stopped by the force guard (%s); paused, and it goes first on resume: %v",
+				job.Kind, job.ID, fault, err)
+			return
+		}
 		q.logger.Warnf("reception-queue: %s %s failed: %v", job.Kind, job.ID, err)
 		q.finish(job, stateFailed, err)
 	default:
@@ -1188,6 +1238,15 @@ func (q *receptionQueue) portraitReturned(ctx context.Context, job *Job, resp ma
 		q.finish(job, statePaused, nil)
 	case err != nil:
 		q.recordProgress(context.Background(), job)
+		if fault, message := q.drawerFault(ctx, err); fault != "" {
+			q.mu.Lock()
+			q.pauseForFaultLocked(fault, message)
+			q.mu.Unlock()
+			// The stroke the guard stopped is drawn again from its start on resume.
+			q.logger.Warnf("reception-queue: portrait %s stopped by the force guard (%s); paused: %v", job.ID, fault, err)
+			q.finish(job, statePaused, nil)
+			return
+		}
 		q.logger.Warnf("reception-queue: portrait %s failed: %v", job.ID, err)
 		q.finish(job, stateFailed, err)
 	case resp["paused"] == true:
@@ -1297,7 +1356,11 @@ func (q *receptionQueue) load() error {
 	}
 	jobs := st.Jobs
 	if st.PausedSince != nil {
-		q.pausedSince = *st.PausedSince
+		q.pausedSince, q.pauseReason, q.pauseError = *st.PausedSince, st.PauseReason, st.PauseError
+		if q.pauseReason == "" {
+			// Saved before pauses had reasons, when only an operator could pause.
+			q.pauseReason = pauseByOperator
+		}
 	}
 	for _, j := range jobs {
 		if j.Total == 0 {
@@ -1322,13 +1385,15 @@ func (q *receptionQueue) load() error {
 // savedState is what state_file holds.
 type savedState struct {
 	PausedSince *time.Time `json:"paused_since,omitempty"`
+	PauseReason string     `json:"pause_reason,omitempty"`
+	PauseError  string     `json:"pause_error,omitempty"`
 	Jobs        []*Job     `json:"jobs"`
 }
 
 func (q *receptionQueue) saveLocked() error {
 	st := savedState{Jobs: q.jobs}
 	if !q.pausedSince.IsZero() {
-		st.PausedSince = &q.pausedSince
+		st.PausedSince, st.PauseReason, st.PauseError = &q.pausedSince, q.pauseReason, q.pauseError
 	}
 	raw, err := json.Marshal(st)
 	if err != nil {
