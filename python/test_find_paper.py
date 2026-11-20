@@ -147,3 +147,22 @@ def test_a_black_mat_with_tilted_tags():
     # The fifth card has a corner hidden under the arm's shadow.
     assert len(cards) == 4
     assert not any(s["used"] for s in found)
+
+
+def test_crosses_on_cards_on_a_black_mat():
+    found = find_crosses(cv2.imread(str(HERE / "testdata" / "crosses_black_mat.jpg")))
+    # Eight drawn; one has a faint arm. The L and T shapes where cards meet are not crosses.
+    assert len(found) == 7
+    assert all(400 < x < 1100 or 300 < x < 400 for x, _ in found)
+
+
+def test_fit_refuses_the_mirror_image_of_a_symmetric_layout():
+    # A 3-2-3 layout with its far corner's cross missing fits its own mirror
+    # image to a fraction of a millimetre; only the unmirrored match is right.
+    image = [[1006.29, 214.02], [689.73, 224.38], [371.83, 228.53], [544.07, 328.39],
+             [860.36, 331.97], [694.26, 444.96], [361.87, 458.24]]
+    arm = [[387, 199], [388, 0], [392, -200], [322, 92], [319, -109], [241, 209], [246, -2], [242, -208]]
+    out = fit_homography(image, arm)
+    pairs = {tuple(m["arm"]): m["image"] for m in out["matched"]}
+    assert pairs[(387.0, 199.0)] == [371.83, 228.53]
+    assert out["unmatched_arm_points"] == [[242.0, -208.0]]

@@ -386,10 +386,15 @@ def find_crosses(img, min_px=8, max_px=80):
             continue
         if not 0.6 <= w / h <= 1.6 or area / (w * h) > 0.5:
             continue
-        # A plus sign's arms run through its middle row and column.
-        mid_row = labels[y + h // 2, x:x + w] == i
-        mid_col = labels[y:y + h, x + w // 2] == i
-        if mid_row.mean() < 0.5 or mid_col.mean() < 0.5:
+        # A plus sign's arms run through its middle row and column; a band, as a
+        # fine-tipped pen's 1-2 px lines rarely fall on the exact middle pixel.
+        band = max(2, min(w, h) // 8)
+        rows = labels[y + h // 2 - band:y + h // 2 + band + 1, x:x + w] == i
+        cols = labels[y:y + h, x + w // 2 - band:x + w // 2 + band + 1] == i
+        mid_row, mid_col = rows.any(0), cols.any(1)
+        # Most of both: where cards meet, their dark gaps make L and T shapes
+        # that run only half of one.
+        if mid_row.mean() < 0.75 or mid_col.mean() < 0.75:
             continue
         out.append([round(float(centroids[i][0]), 2), round(float(centroids[i][1]), 2)])
     return out
@@ -398,37 +403,56 @@ def find_crosses(img, min_px=8, max_px=80):
 def fit_homography(image_points, arm_points, tol_px=6.0):
     """Match each arm point to the cross it drew and fit image -> arm.
 
-    Which cross is which isn't known, and a symmetric pattern would match
-    itself turned or mirrored, so every assignment of the four most spread arm
-    points to four detected crosses is tried; the one that explains the most
-    other crosses wins.
+    Which cross is which isn't known, so assignments of four well-spread arm
+    points to four detected crosses are tried, and the one that explains the
+    most other crosses wins. More than one set of four is tried, since a cross
+    that came out too faint to find leaves its point nothing to match. A camera
+    looking down sees the mat mirrored relative to the arm's frame, so a match
+    that isn't mirrored is refused: a symmetric layout fits its own mirror
+    image just as well.
     """
     img = np.asarray(image_points, float)
     arm = np.asarray(arm_points, float)
     if len(arm) < 4 or len(img) < 4:
         raise SystemExit("need at least four crosses and four arm points")
-    anchors = max(itertools.combinations(range(len(arm)), 4),
-                  key=lambda q: cv2.contourArea(cv2.convexHull(arm[list(q)].astype(np.float32))))
-    src = arm[list(anchors)].astype(np.float32)
+
+    def signed_area(q):
+        x, y = q[:, 0], q[:, 1]
+        return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+    def hull_area(q):
+        return cv2.contourArea(cv2.convexHull(arm[list(q)].astype(np.float32)))
+
+    quads = sorted(itertools.combinations(range(len(arm)), 4), key=hull_area, reverse=True)
+    quads = [q for q in quads if hull_area(q) >= 0.25 * hull_area(quads[0])][:12]
     best = None
-    for perm in itertools.permutations(range(len(img)), 4):
-        dst = img[list(perm)].astype(np.float32)
-        try:
-            h = cv2.getPerspectiveTransform(src, dst)
-        except cv2.error:
-            continue
-        projected = cv2.perspectiveTransform(arm.reshape(-1, 1, 2), h).reshape(-1, 2)
-        if not np.all(np.isfinite(projected)):
-            continue
-        d = np.linalg.norm(projected[:, None, :] - img[None, :, :], axis=2)
-        match = d.argmin(1)
-        ok = d[np.arange(len(arm)), match] < tol_px
-        # One cross per arm point.
-        if len(set(match[ok])) != ok.sum():
-            continue
-        score = (ok.sum(), -d[np.arange(len(arm)), match][ok].sum())
-        if best is None or score > best[0]:
-            best = (score, match, ok)
+    for anchors in quads:
+        src = arm[list(anchors)].astype(np.float32)
+        # Order the anchors around their hull so their signed area means something.
+        centre = src.mean(0)
+        order = np.argsort(np.arctan2(src[:, 1] - centre[1], src[:, 0] - centre[0]))
+        anchors = [anchors[k] for k in order]
+        src = src[order]
+        for perm in itertools.permutations(range(len(img)), 4):
+            dst = img[list(perm)].astype(np.float32)
+            if signed_area(src) * signed_area(dst) >= 0:
+                continue
+            try:
+                h = cv2.getPerspectiveTransform(src, dst)
+            except cv2.error:
+                continue
+            projected = cv2.perspectiveTransform(arm.reshape(-1, 1, 2), h).reshape(-1, 2)
+            if not np.all(np.isfinite(projected)):
+                continue
+            d = np.linalg.norm(projected[:, None, :] - img[None, :, :], axis=2)
+            match = d.argmin(1)
+            ok = d[np.arange(len(arm)), match] < tol_px
+            # One cross per arm point.
+            if len(set(match[ok])) != ok.sum():
+                continue
+            score = (ok.sum(), -d[np.arange(len(arm)), match][ok].sum())
+            if best is None or score > best[0]:
+                best = (score, match, ok)
     if best is None or best[0][0] < 4:
         raise SystemExit("could not match the crosses to the arm points")
     _, match, ok = best
