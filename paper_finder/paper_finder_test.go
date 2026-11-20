@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"go.viam.com/utils/protoutils"
-
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/data"
@@ -17,6 +15,7 @@ import (
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/test"
+	"go.viam.com/utils/protoutils"
 )
 
 func ptr[T any](v T) *T { return &v }
