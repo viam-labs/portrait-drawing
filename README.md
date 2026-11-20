@@ -223,6 +223,7 @@ sheet keeps its plane.
 | `start_above_mm` | number | no | Where each touch starts stepping down, above the configured height. Default 1. |
 | `step_mm`, `fine_step_mm` | number | no | Steps before and after the pen first feels the paper. Default 0.2 and 0.05. |
 | `max_depth_mm` | number | no | How far below the configured height a touch may go before it gives up. Default 1.5. |
+| `max_tilt_mm_per_100mm` | number | no | The steepest plane the touches may fit before the drawing is refused as a sheet lying on something. Default 1. The top card of a spring-loaded stack held down at one end by a feed roller slopes by design; on armfarm07's card dispenser that is about 4. |
 
 It needs `force_guard`. The arm crosses between touches 40 mm above the paper
 and comes straight down to each, since a free move that also descends can dip
@@ -230,7 +231,7 @@ below its end on the way. It zeroes the force only once two readings in a row
 agree, since the reading drifts for a moment after that drop. Every move down is guarded as in a drawing, so a capped
 pen meets the paper on its way to the start of a touch and trips there; the lift
 after each touch is not, since moving away can only ease the force. A touch that
-feels nothing, or a plane steeper than 1 mm per 100 mm, fails the drawing. The
+feels nothing, or a plane steeper than `max_tilt_mm_per_100mm`, fails the drawing. The
 log reports each touch and the plane's slope.
 
 ### `pen_force`

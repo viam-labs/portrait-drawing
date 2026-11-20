@@ -124,3 +124,10 @@ func TestTouchOffConfig_pressDefaultsButZeroIsAllowed(t *testing.T) {
 	_, _, err := cfg.Validate("")
 	test.That(t, err, test.ShouldNotBeNil)
 }
+
+func TestTouchOffConfig_tiltLimitDefaultsAndValidates(t *testing.T) {
+	test.That(t, (&TouchOffConfig{}).withDefaults().MaxTiltPer100MM, test.ShouldEqual, 1.0)
+	test.That(t, (&TouchOffConfig{MaxTiltPer100MM: 5}).withDefaults().MaxTiltPer100MM, test.ShouldEqual, 5.0)
+	guard := &ForceGuardConfig{MaxForce: 7.5}
+	test.That(t, (&TouchOffConfig{MaxTiltPer100MM: -1}).validate(guard), test.ShouldNotBeNil)
+}
