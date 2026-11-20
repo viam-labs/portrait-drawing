@@ -33,10 +33,13 @@ TAG_MM = (85.0, 57.0)
 # Mat brightness is fitted as a smooth surface; a sheet must stand this far
 # above it. The Cricut grid lines reach about 26, a dim tag border over 30.
 BRIGHT_ABOVE_MAT = 29
-# A black mat reads below this lightness (0-255); the table and sheets well above.
-MAT_DARK_L = 90
+# A black mat is grey and reads below this lightness (0-255) even under glare,
+# which lifts parts of it to 135; sheets read 200 and up.
+MAT_DARK_L = 160
+MAT_CHROMA = 12
+BLACK_MAT_MEDIAN_L = 105
 MIN_DARK_MAT_FRACTION = 0.2
-BLACK_MAT_SHEET_L = 130
+BLACK_MAT_SHEET_L = 170
 # Smallest sheet, in pixels of area, so grid squares and scraps are ignored.
 MIN_SHEET_PX = 8000
 MIN_RECT_FILL = 0.9
@@ -61,11 +64,19 @@ def read_image(data):
 def mat_region(lab):
     """The mat: a black one if most of the view is dark, else the big region
     that isn't the reddish wooden table around a green one."""
-    dark = (lab[..., 0] < MAT_DARK_L).astype(np.uint8) * 255
+    # Grey, not too bright: a black mat even where glare lifts it, but not the
+    # yellowish wood around it or the white sheets on it.
+    neutral = (np.abs(lab[..., 1] - 128) < MAT_CHROMA) & (np.abs(lab[..., 2] - 128) < MAT_CHROMA)
+    dark = (neutral & (lab[..., 0] < MAT_DARK_L)).astype(np.uint8) * 255
     dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
     contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     biggest = max(contours, key=cv2.contourArea) if contours else None
     black = biggest is not None and cv2.contourArea(biggest) >= MIN_DARK_MAT_FRACTION * dark.size
+    if black:
+        region = np.zeros(dark.shape, np.uint8)
+        cv2.drawContours(region, [biggest], -1, 255, -1)
+        # A pale grey-green cutting mat is grey enough to pass too; black reads darker.
+        black = np.median(lab[..., 0][(region > 0) & (dark > 0)]) < BLACK_MAT_MEDIAN_L
     if not black:
         mat = (lab[..., 1] < 134).astype(np.uint8) * 255
         mat = cv2.morphologyEx(mat, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
@@ -265,7 +276,10 @@ def find_sheets(img, template):
     if black:
         # Glare lifts parts of a black mat to 80 or more, sharper than a smooth
         # fit follows, but a sheet's border stays far above it.
-        above = lightness > BLACK_MAT_SHEET_L
+        # A tag's label can be no brighter than glare on the mat, but the mat is
+        # grey and a label is coloured.
+        chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+        above = (lightness > BLACK_MAT_SHEET_L) | ((lightness > 100) & (chroma >= MAT_CHROMA))
     else:
         above = (lightness - mat_background(lightness, inside)) > BRIGHT_ABOVE_MAT
     bright = (above & (inside > 0)).astype(np.uint8) * 255

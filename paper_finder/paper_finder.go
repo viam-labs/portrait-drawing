@@ -414,7 +414,9 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 	sort.SliceStable(sheets, func(i, j int) bool {
 		return sheets[i]["distance_mm"].(float64) < sheets[j]["distance_mm"].(float64)
 	})
-	return map[string]interface{}{"sheets": sheets, "rejected": rejected}, nil
+	// Plain []interface{}: a queue in the same module gets this map as it is,
+	// not through structpb, and reads lists as []interface{} as it would off the wire.
+	return map[string]interface{}{"sheets": anyList(sheets), "rejected": anyList(rejected)}, nil
 }
 
 // detect photographs the mat and finds the sheets on it, in pixels, showing
@@ -461,6 +463,14 @@ func (f *paperFinder) look(ctx context.Context) (map[string]interface{}, error) 
 	}
 	delete(found, "mat_px")
 	return found, nil
+}
+
+func anyList(maps []map[string]interface{}) []interface{} {
+	out := make([]interface{}, len(maps))
+	for i, m := range maps {
+		out[i] = m
+	}
+	return out
 }
 
 // pixelList is pts as a DoCommand response can carry them: structpb takes

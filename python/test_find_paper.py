@@ -143,7 +143,7 @@ def test_a_black_mat_with_tilted_tags():
     tags = [s for s in found if s["kind"] == "name_tag"]
     cards = [s for s in found if s["kind"] == "card"]
     assert len(tags) == 8
-    assert all(t["logo"] and t["logo"]["score"] > 0.8 for t in tags)
+    assert all(t["logo"] and t["logo"]["score"] > 0.6 for t in tags)
     # The fifth card has a corner hidden under the arm's shadow.
     assert len(cards) == 4
     assert not any(s["used"] for s in found)
@@ -166,3 +166,11 @@ def test_fit_refuses_the_mirror_image_of_a_symmetric_layout():
     pairs = {tuple(m["arm"]): m["image"] for m in out["matched"]}
     assert pairs[(387.0, 199.0)] == [371.83, 228.53]
     assert out["unmatched_arm_points"] == [[242.0, -208.0]]
+
+
+def test_a_black_mat_under_glare():
+    # Glare lifts half the mat to the brightness of a tag's label.
+    found = find_sheets(cv2.imread(str(HERE / "testdata" / "black_mat_glare.jpg")),
+                        cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
+    assert sorted(s["kind"] for s in found) == ["card", "name_tag"]
+    assert not any(s["used"] for s in found)

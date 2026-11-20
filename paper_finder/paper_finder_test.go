@@ -159,7 +159,7 @@ func TestFind_placesACardInArmCoordinates(t *testing.T) {
 	f.cal = &halfScale
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
-	sheets := out["sheets"].([]map[string]interface{})
+	sheets := mapsOf(t, out["sheets"])
 	test.That(t, len(sheets), test.ShouldEqual, 1)
 	tl, tr, w, h := paperOf(t, sheets[0])
 	test.That(t, tl["x"], test.ShouldAlmostEqual, 200.0)
@@ -177,7 +177,7 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 	f.cal = &halfScale
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"kind": "card"}})
 	test.That(t, err, test.ShouldBeNil)
-	got := out["sheets"].([]map[string]interface{})
+	got := mapsOf(t, out["sheets"])
 	test.That(t, len(got), test.ShouldEqual, 2)
 	tl0, _, _, _ := paperOf(t, got[0])
 	tl1, _, _, _ := paperOf(t, got[1])
@@ -186,7 +186,7 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 
 	out, err = f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"include_used": true}})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(out["sheets"].([]map[string]interface{})), test.ShouldEqual, 3)
+	test.That(t, len(mapsOf(t, out["sheets"])), test.ShouldEqual, 3)
 }
 
 func TestFind_kindFilter(t *testing.T) {
@@ -210,7 +210,7 @@ func TestFind_nameTagPaperIsTheLabelInsideItsBacking(t *testing.T) {
 	f.cal = &halfScale
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
-	tl, _, w, h := paperOf(t, out["sheets"].([]map[string]interface{})[0])
+	tl, _, w, h := paperOf(t, mapsOf(t, out["sheets"])[0])
 	test.That(t, tl["x"], test.ShouldAlmostEqual, defaultBackingMarginMM)
 	test.That(t, tl["y"], test.ShouldAlmostEqual, -defaultBackingMarginMM)
 	test.That(t, w, test.ShouldEqual, 82.0)
@@ -225,14 +225,14 @@ func TestFind_rejectsWrongSizesAndMirroredCalibrations(t *testing.T) {
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, out["sheets"], test.ShouldBeEmpty)
-	rejected := out["rejected"].([]map[string]interface{})
+	rejected := mapsOf(t, out["rejected"])
 	test.That(t, rejected[0]["reason"], test.ShouldContainSubstring, "measures 200 x 300")
 
 	f, _, _, _, _ = newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(0, 0, false))})
 	f.cal = &calibration{Homography: [3][3]float64{{0.5, 0, 0}, {0, 0.5, 0}, {0, 0, 1}}}
 	out, err = f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, out["rejected"].([]map[string]interface{})[0]["reason"], test.ShouldContainSubstring, "mirrors")
+	test.That(t, mapsOf(t, out["rejected"])[0]["reason"], test.ShouldContainSubstring, "mirrors")
 }
 
 func calibrationConfig() *Config {
@@ -360,4 +360,17 @@ func TestResponsesSurviveTheWire(t *testing.T) {
 		_, err = protoutils.StructToStructPb(out)
 		test.That(t, err, test.ShouldBeNil)
 	}
+}
+
+
+// mapsOf reads a response list the way a caller must: as []interface{}.
+func mapsOf(t *testing.T, v interface{}) []map[string]interface{} {
+	t.Helper()
+	list, ok := v.([]interface{})
+	test.That(t, ok, test.ShouldBeTrue)
+	out := make([]map[string]interface{}, len(list))
+	for i, item := range list {
+		out[i] = item.(map[string]interface{})
+	}
+	return out
 }
