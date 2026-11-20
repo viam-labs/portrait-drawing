@@ -317,9 +317,6 @@ type drawer struct {
 	// touched is the paper the last touch-off measured, kept so a drawing that
 	// resumes on the same sheet does not touch it off again.
 	touched *touchedPaper
-	// penOffset is where pen_force left the pen's depth, carried into the next
-	// drawing so it does not start over.
-	penOffset float64
 
 	mu       sync.Mutex
 	cancelFn context.CancelFunc
@@ -1129,7 +1126,9 @@ type drawMove struct {
 	linear bool
 	clear  bool
 	// stroke is pen-down through pen-up, the moves pen_force judges.
-	stroke       bool
+	stroke bool
+	// contactMM is how far a stroke runs with the pen on the paper.
+	contactMM    float64
 	endsPolyline bool
 	label        string
 }
@@ -1161,6 +1160,7 @@ func strokeMoves(wps []waypoint) []drawMove {
 				i++
 				next := r3.Vector{X: wps[i].x, Y: wps[i].y, Z: wps[i].z}
 				if wps[i].contact {
+					mv.contactMM += mv.points[len(mv.points)-1].Distance(next)
 					mv.points = append(mv.points, along(mv.points[len(mv.points)-1], next, maxStrokeStepMM)...)
 				}
 				mv.points = append(mv.points, next)
@@ -1302,7 +1302,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 
 	var pf *penForce
 	if d.cfg.PenForce != nil && d.forceGuard != nil {
-		pf = &penForce{cfg: d.cfg.PenForce.withDefaults(), offset: d.penOffset}
+		pf = &penForce{cfg: d.cfg.PenForce.withDefaults()}
 		defer d.finishPenForce(pf)
 	}
 	moves := strokeMoves(waypoints)
@@ -1345,7 +1345,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 			}
 			return nil, wrapped
 		}
-		if pf != nil && mv.stroke {
+		if pf != nil && mv.stroke && mv.contactMM >= minJudgedStrokeMM {
 			before := pf.offset
 			verdict := pf.judge(run.stroke)
 			if verdict == penLight || verdict == penHeavy {

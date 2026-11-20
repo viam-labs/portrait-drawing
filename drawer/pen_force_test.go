@@ -51,4 +51,5 @@ func TestStrokeMoves_marksOnlyStrokes(t *testing.T) {
 	test.That(t, moves[0].stroke, test.ShouldBeFalse)
 	test.That(t, moves[1].stroke, test.ShouldBeFalse)
 	test.That(t, moves[2].stroke, test.ShouldBeTrue)
+	test.That(t, moves[2].contactMM, test.ShouldAlmostEqual, 10.0)
 }

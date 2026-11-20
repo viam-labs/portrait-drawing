@@ -234,8 +234,9 @@ there. After each stroke the drawer averages the force over it. Below `min`, the
 pen goes `step_mm` deeper for the strokes that follow and the stroke is drawn
 once more; above `max`, it goes `step_mm` shallower. One stroke's average holds
 hundreds of readings, so it sees past the 1–3 N jolts of a moving arm that no
-single reading can. Strokes too short to judge pool with the next. Where the
-pen ended up carries into the next drawing.
+single reading can. Strokes under 20 mm are not judged: much of their move is
+the pen coming down and going up, which reads light. Each drawing starts from
+its own touch-off, with no adjustment.
 
 ```json
 "pen_force": { "min": 1.2, "max": 3.0 }
@@ -245,7 +246,7 @@ pen ended up carries into the next drawing.
 |---|---|---|---|
 | `min`, `max` | number | yes | The range a stroke's mean force over the baseline must stay in. A moving arm reads about 0.8 N with the pen in the air, so `min` goes above that. `max` must be below `force_guard.max_force`. |
 | `step_mm` | number | no | How far the pen moves after a stroke out of range. Default 0.1. |
-| `max_adjust_mm` | number | no | The most it moves either way in all. Default 1. |
+| `max_adjust_mm` | number | no | The most it moves either way in all. Default 0.5. |
 
 It needs `force_guard`. The log reports each stroke out of range and, at the
 end, where the pen finished and how many strokes were drawn again.

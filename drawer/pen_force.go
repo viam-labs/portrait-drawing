@@ -8,11 +8,14 @@ import (
 
 const (
 	defaultPenForceStepMM      = 0.1
-	defaultPenForceMaxAdjustMM = 1.0
+	defaultPenForceMaxAdjustMM = 0.5
 	// minPenForceSamples is how many readings a judgement rests on. Short
 	// strokes pool until there are this many, since a few readings are mostly
 	// the arm's own jolts.
 	minPenForceSamples = 15
+	// minJudgedStrokeMM leaves shorter strokes unjudged: much of their move is
+	// the pen coming down and going up, which reads as a light stroke.
+	minJudgedStrokeMM = 20.0
 )
 
 // PenForceConfig holds each stroke's mean force between min and max by moving
@@ -25,7 +28,7 @@ type PenForceConfig struct {
 	Max float64 `json:"max"`
 	// StepMM is how far the pen moves after a stroke out of range. Default 0.1.
 	StepMM float64 `json:"step_mm,omitempty"`
-	// MaxAdjustMM bounds the total adjustment either way. Default 1.
+	// MaxAdjustMM bounds the total adjustment either way. Default 0.5.
 	MaxAdjustMM float64 `json:"max_adjust_mm,omitempty"`
 }
 
@@ -99,7 +102,6 @@ func (p *penForce) judge(stroke forceStats) penVerdict {
 }
 
 func (d *drawer) finishPenForce(p *penForce) {
-	d.penOffset = p.offset
 	d.logger.Infof("drawer: pen_force: pen at %+.2f mm; %d light and %d heavy judgements, %d strokes redrawn",
 		p.offset, p.light, p.heavy, p.redrawn)
 }
