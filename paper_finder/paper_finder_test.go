@@ -362,7 +362,6 @@ func TestResponsesSurviveTheWire(t *testing.T) {
 	}
 }
 
-
 // mapsOf reads a response list the way a caller must: as []interface{}.
 func mapsOf(t *testing.T, v interface{}) []map[string]interface{} {
 	t.Helper()
