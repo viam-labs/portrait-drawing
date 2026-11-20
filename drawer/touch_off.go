@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/golang/geo/r3"
@@ -28,8 +29,12 @@ const (
 	defaultPressMM = 0.2
 	// touchSettle lets the arm stop ringing before a step's force is read: a
 	// reading taken while it still moves is the arm, not the paper.
-	touchSettle        = 100 * time.Millisecond
-	touchReadings      = 3
+	touchSettle   = 100 * time.Millisecond
+	touchReadings = 3
+	// stillBaselineN is how closely consecutive baselines must agree, well
+	// under touch_off.force.
+	stillBaselineN     = 0.1
+	maxBaselineTries   = 10
 	minTouchSpreadMM   = 20.0
 	maxTouchTiltPer1mm = 0.01
 )
@@ -144,15 +149,70 @@ func contactZ(samples []touchSample, force float64) (float64, bool) {
 	return 0, false
 }
 
-// touchPointsFor is where to touch: two corners and the far edge's middle of
-// the drawing's own extent, so the plane is measured where the pen will be.
+// touchPointsFor is where to touch: three of the drawing's own points spanning
+// the largest triangle, so each touch lands where the pen will draw, on the
+// sheet and not the mat around it, and its dot is drawn over. A drawing too
+// narrow to span one falls back to a box around it.
 func touchPointsFor(polylines []Polyline, first int) [3][2]float64 {
-	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	var pts [][2]float64
 	for _, poly := range polylines[first:] {
-		for _, p := range poly {
-			minX, maxX = math.Min(minX, p[0]), math.Max(maxX, p[0])
-			minY, maxY = math.Min(minY, p[1]), math.Max(maxY, p[1])
+		pts = append(pts, poly...)
+	}
+	hull := convexHull(pts)
+	var best [3][2]float64
+	bestArea := 0.0
+	for i := 0; i < len(hull); i++ {
+		for j := i + 1; j < len(hull); j++ {
+			for k := j + 1; k < len(hull); k++ {
+				if a := triangleArea(hull[i], hull[j], hull[k]); a > bestArea {
+					best, bestArea = [3][2]float64{hull[i], hull[j], hull[k]}, a
+				}
+			}
 		}
+	}
+	if bestArea >= minTouchSpreadMM*minTouchSpreadMM/2 {
+		return best
+	}
+	return boxTouchPoints(pts)
+}
+
+func triangleArea(a, b, c [2]float64) float64 {
+	return math.Abs((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])) / 2
+}
+
+// convexHull is the hull's corners, by Andrew's monotone chain.
+func convexHull(pts [][2]float64) [][2]float64 {
+	p := append([][2]float64(nil), pts...)
+	sort.Slice(p, func(i, j int) bool { return p[i][0] < p[j][0] || (p[i][0] == p[j][0] && p[i][1] < p[j][1]) })
+	if len(p) < 3 {
+		return p
+	}
+	cross := func(o, a, b [2]float64) float64 { return (a[0]-o[0])*(b[1]-o[1]) - (a[1]-o[1])*(b[0]-o[0]) }
+	hull := make([][2]float64, 0, 2*len(p))
+	for _, pass := range [2]bool{false, true} {
+		start := len(hull)
+		for n := range p {
+			q := p[n]
+			if pass {
+				q = p[len(p)-1-n]
+			}
+			for len(hull) >= start+2 && cross(hull[len(hull)-2], hull[len(hull)-1], q) <= 0 {
+				hull = hull[:len(hull)-1]
+			}
+			hull = append(hull, q)
+		}
+		hull = hull[:len(hull)-1]
+	}
+	return hull
+}
+
+// boxTouchPoints is two corners and the far edge's middle of a box around pts,
+// at least minTouchSpreadMM each way.
+func boxTouchPoints(pts [][2]float64) [3][2]float64 {
+	minX, minY, maxX, maxY := math.Inf(1), math.Inf(1), math.Inf(-1), math.Inf(-1)
+	for _, p := range pts {
+		minX, maxX = math.Min(minX, p[0]), math.Max(maxX, p[0])
+		minY, maxY = math.Min(minY, p[1]), math.Max(maxY, p[1])
 	}
 	grow := func(lo, hi float64) (float64, float64) {
 		if hi-lo >= minTouchSpreadMM {
@@ -169,12 +229,12 @@ func touchPointsFor(polylines []Polyline, first int) [3][2]float64 {
 // touchOff touches the pen down at each point in turn and fits the paper's plane.
 func (d *drawer) touchOff(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, at [3]r3.Vector,
-	orientation spatialmath.Orientation, zDown, zUp float64,
+	orientation spatialmath.Orientation, zDown float64,
 ) (*touchPlane, error) {
 	cfg := d.cfg.TouchOff.withDefaults()
 	var found [3]r3.Vector
 	for i, p := range at {
-		z, err := d.touchOne(ctx, fs, run, p, orientation, zDown, zUp, cfg)
+		z, err := d.touchOne(ctx, fs, run, p, orientation, zDown, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("touch-off %d of 3 at (%.1f, %.1f): %w", i+1, p.X, p.Y, err)
 		}
@@ -199,26 +259,29 @@ func (d *drawer) touchOff(
 // stopped it would leave the pen pressing.
 func (d *drawer) touchOne(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, p r3.Vector, orientation spatialmath.Orientation,
-	zDown, zUp float64, cfg TouchOffConfig,
+	zDown float64, cfg TouchOffConfig,
 ) (float64, error) {
 	move := func(z float64, linear, clear bool) error {
 		target := spatialmath.NewPose(r3.Vector{X: p.X, Y: p.Y, Z: z}, orientation)
 		return d.guardedMove(ctx, fs, []spatialmath.Pose{target}, run, linear, clear, nil)
 	}
+	// A free move that also descends can dip below its end on the way, so the
+	// arm crosses between touches high and only comes down straight.
+	travel := zDown + baselineHeightMM
 	lift := func() {
-		up := spatialmath.NewPose(r3.Vector{X: p.X, Y: p.Y, Z: zUp}, orientation)
+		up := spatialmath.NewPose(r3.Vector{X: p.X, Y: p.Y, Z: travel}, orientation)
 		if err := d.planAndExecute(ctx, fs, up, d.constraints(true)); err != nil {
 			d.logger.Warnf("drawer: lift after touch-off: %v", err)
 		}
 	}
-	if err := move(zUp, false, true); err != nil {
+	if err := move(travel, false, true); err != nil {
 		return 0, err
 	}
 	start := zDown + cfg.StartAboveMM
 	if err := move(start, true, true); err != nil {
 		return 0, err
 	}
-	baseline, err := d.forceGuard.measureBaseline(ctx)
+	baseline, err := d.stillBaseline(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -251,6 +314,27 @@ func (d *drawer) touchOne(
 	}
 	lift()
 	return 0, fmt.Errorf("felt nothing down to %.1f mm below the paper's configured height; is there paper there?", cfg.MaxDepthMM)
+}
+
+// stillBaseline measures until two baselines in a row agree. After the long
+// straight drop to a touch the reading keeps drifting for a while, and a
+// baseline taken during it read paper 0.8 mm before the pen reached it.
+func (d *drawer) stillBaseline(ctx context.Context) (float64, error) {
+	prev, err := d.forceGuard.measureBaseline(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for i := 0; i < maxBaselineTries; i++ {
+		cur, err := d.forceGuard.measureBaseline(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if math.Abs(cur-prev) <= stillBaselineN {
+			return cur, nil
+		}
+		prev = cur
+	}
+	return 0, fmt.Errorf("the force reading kept drifting by more than %g N with the arm still", stillBaselineN)
 }
 
 // settledForce waits for the arm to stop ringing, then averages a few readings
@@ -298,7 +382,7 @@ func (t *touchedPaper) same(paper surface) bool {
 // last one measured, reuses that.
 func (d *drawer) paperPlane(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, polylines []Polyline, startAt int,
-	paper surface, zDown, zUp float64,
+	paper surface, zDown float64,
 ) (*touchPlane, error) {
 	if startAt > 0 && d.touched.same(paper) {
 		return d.touched.plane, nil
@@ -309,7 +393,7 @@ func (d *drawer) paperPlane(
 		x, y := paperToWorld(corner, paper.across, p)
 		at[i] = r3.Vector{X: x, Y: y}
 	}
-	plane, err := d.touchOff(ctx, fs, run, at, paper.corner.Orientation(), zDown, zUp)
+	plane, err := d.touchOff(ctx, fs, run, at, paper.corner.Orientation(), zDown)
 	if err != nil {
 		return nil, err
 	}

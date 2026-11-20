@@ -15,6 +15,7 @@ import (
 	"go.viam.com/rdk/services/generic"
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/test"
+	"go.viam.com/utils/protoutils"
 )
 
 func ptr[T any](v T) *T { return &v }
@@ -158,7 +159,7 @@ func TestFind_placesACardInArmCoordinates(t *testing.T) {
 	f.cal = &halfScale
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
-	sheets := out["sheets"].([]map[string]interface{})
+	sheets := mapsOf(t, out["sheets"])
 	test.That(t, len(sheets), test.ShouldEqual, 1)
 	tl, tr, w, h := paperOf(t, sheets[0])
 	test.That(t, tl["x"], test.ShouldAlmostEqual, 200.0)
@@ -176,7 +177,7 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 	f.cal = &halfScale
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"kind": "card"}})
 	test.That(t, err, test.ShouldBeNil)
-	got := out["sheets"].([]map[string]interface{})
+	got := mapsOf(t, out["sheets"])
 	test.That(t, len(got), test.ShouldEqual, 2)
 	tl0, _, _, _ := paperOf(t, got[0])
 	tl1, _, _, _ := paperOf(t, got[1])
@@ -185,7 +186,7 @@ func TestFind_nearestFirstAndUsedLeftOut(t *testing.T) {
 
 	out, err = f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{"include_used": true}})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(out["sheets"].([]map[string]interface{})), test.ShouldEqual, 3)
+	test.That(t, len(mapsOf(t, out["sheets"])), test.ShouldEqual, 3)
 }
 
 func TestFind_kindFilter(t *testing.T) {
@@ -209,7 +210,7 @@ func TestFind_nameTagPaperIsTheLabelInsideItsBacking(t *testing.T) {
 	f.cal = &halfScale
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
-	tl, _, w, h := paperOf(t, out["sheets"].([]map[string]interface{})[0])
+	tl, _, w, h := paperOf(t, mapsOf(t, out["sheets"])[0])
 	test.That(t, tl["x"], test.ShouldAlmostEqual, defaultBackingMarginMM)
 	test.That(t, tl["y"], test.ShouldAlmostEqual, -defaultBackingMarginMM)
 	test.That(t, w, test.ShouldEqual, 82.0)
@@ -224,14 +225,14 @@ func TestFind_rejectsWrongSizesAndMirroredCalibrations(t *testing.T) {
 	out, err := f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, out["sheets"], test.ShouldBeEmpty)
-	rejected := out["rejected"].([]map[string]interface{})
+	rejected := mapsOf(t, out["rejected"])
 	test.That(t, rejected[0]["reason"], test.ShouldContainSubstring, "measures 200 x 300")
 
 	f, _, _, _, _ = newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(0, 0, false))})
 	f.cal = &calibration{Homography: [3][3]float64{{0.5, 0, 0}, {0, 0.5, 0}, {0, 0, 1}}}
 	out, err = f.DoCommand(context.Background(), map[string]interface{}{"find": nil})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, out["rejected"].([]map[string]interface{})[0]["reason"], test.ShouldContainSubstring, "mirrors")
+	test.That(t, mapsOf(t, out["rejected"])[0]["reason"], test.ShouldContainSubstring, "mirrors")
 }
 
 func calibrationConfig() *Config {
@@ -248,23 +249,24 @@ func TestCalibrate_drawsACrossAtEachPoint(t *testing.T) {
 	f, _, _, dr, _ := newTestFinder(t, calibrationConfig(), map[string]string{"crosses": `{"crosses":[]}`, "fit": fitOK})
 	_, err := f.DoCommand(context.Background(), map[string]interface{}{"calibrate": nil})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(dr.cmds), test.ShouldEqual, 1)
+	// One draw per cross, so each touches off on its own sheet.
+	test.That(t, len(dr.cmds), test.ShouldEqual, 5)
 	draw := dr.cmds[0]["draw"].(map[string]interface{})
 	polylines := draw["polylines"].([]interface{})
-	test.That(t, len(polylines), test.ShouldEqual, 10)
+	test.That(t, len(polylines), test.ShouldEqual, 2)
 
 	paper := draw["paper"].(map[string]interface{})
 	tl := paper["top_left_corner"].(map[string]interface{})["translation"].(map[string]interface{})
 	margin := defaultCrossMM/2 + 5
+	// The first point is (150, -100), at the middle of its page.
 	test.That(t, tl["x"], test.ShouldEqual, 150-margin)
-	test.That(t, tl["y"], test.ShouldEqual, 100+margin)
+	test.That(t, tl["y"], test.ShouldEqual, -100+margin)
 	test.That(t, tl["z"], test.ShouldEqual, 290.0)
-	test.That(t, paper["width_mm"], test.ShouldEqual, 150+2*margin)
-	test.That(t, paper["height_mm"], test.ShouldEqual, 200+2*margin)
-	// The first point, (150, -100), is margin in from the page's left and 200+margin down.
+	test.That(t, paper["width_mm"], test.ShouldEqual, 2*margin)
+	test.That(t, paper["height_mm"], test.ShouldEqual, 2*margin)
 	first := polylines[0].([]interface{})
-	test.That(t, first[0], test.ShouldResemble, []float64{margin - defaultCrossMM/2, 200 + margin})
-	test.That(t, first[1], test.ShouldResemble, []float64{margin + defaultCrossMM/2, 200 + margin})
+	test.That(t, first[0], test.ShouldResemble, []float64{margin - defaultCrossMM/2, margin})
+	test.That(t, first[1], test.ShouldResemble, []float64{margin + defaultCrossMM/2, margin})
 }
 
 func TestCalibrate_fitsCrossesToTheArmPointsAndKeepsTheResult(t *testing.T) {
@@ -308,4 +310,66 @@ func TestCalibrate_refusesAFitFromTooFewCrosses(t *testing.T) {
 	test.That(t, err.Error(), test.ShouldContainSubstring, "only 4 of 5")
 	_, statErr := os.Stat(f.calPath)
 	test.That(t, os.IsNotExist(statErr), test.ShouldBeTrue)
+}
+
+func TestLook_worksUncalibratedAndShowsTheView(t *testing.T) {
+	out := `{"sheets": [{"kind": "card", "used": false}], "rejected": [], "mat_px": [[0, 0]], "annotated_png_b64": "cG5n"}`
+	f, _, sw, _, fp := newTestFinder(t, validConfig(), map[string]string{"sheets": out})
+	view := &fakeDrawer{}
+	f.view, f.cfg.ViewCamera = view, "paper-view"
+	resp, err := f.DoCommand(context.Background(), map[string]interface{}{"look": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(resp["sheets"].([]interface{})), test.ShouldEqual, 1)
+	test.That(t, resp["view_camera"], test.ShouldEqual, "paper-view")
+	_, hasPNG := resp["annotated_png_b64"]
+	test.That(t, hasPNG, test.ShouldBeFalse)
+	test.That(t, sw.positions, test.ShouldResemble, []uint32{surveyPosition})
+	test.That(t, string(fp.stdin["sheets"]), test.ShouldEqual, "photo")
+	test.That(t, len(view.cmds), test.ShouldEqual, 1)
+	set := view.cmds[0]["set_image"].(map[string]interface{})
+	test.That(t, set["image_b64"], test.ShouldEqual, "cG5n")
+}
+
+func TestFind_showsTheViewToo(t *testing.T) {
+	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(100, 100, false))})
+	f.cal = &halfScale
+	view := &fakeDrawer{}
+	f.view = view
+	_, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	// The fake output carries no image, so there is nothing to show.
+	test.That(t, len(view.cmds), test.ShouldEqual, 0)
+}
+
+// Each response goes back over gRPC as a structpb.Struct, which refuses Go's
+// fixed-size arrays: find reached the wire only to fail there.
+func TestResponsesSurviveTheWire(t *testing.T) {
+	sheets := sheetJSON(t, cardAt(400, 200, false), cardAt(0, 0, false))
+	f, _, _, _, _ := newTestFinder(t, calibrationConfig(), map[string]string{
+		"sheets": sheets, "crosses": `{"crosses":[[1,2],[3,4]]}`, "fit": fitOK,
+	})
+	f.cal = &halfScale
+	for _, cmd := range []map[string]interface{}{
+		{"find": map[string]interface{}{"include_used": true}},
+		{"look": map[string]interface{}{}},
+		{"calibrate": map[string]interface{}{"redraw": false}},
+		{"status": map[string]interface{}{}},
+	} {
+		out, err := f.DoCommand(context.Background(), cmd)
+		test.That(t, err, test.ShouldBeNil)
+		_, err = protoutils.StructToStructPb(out)
+		test.That(t, err, test.ShouldBeNil)
+	}
+}
+
+// mapsOf reads a response list the way a caller must: as []interface{}.
+func mapsOf(t *testing.T, v interface{}) []map[string]interface{} {
+	t.Helper()
+	list, ok := v.([]interface{})
+	test.That(t, ok, test.ShouldBeTrue)
+	out := make([]map[string]interface{}, len(list))
+	for i, item := range list {
+		out[i] = item.(map[string]interface{})
+	}
+	return out
 }

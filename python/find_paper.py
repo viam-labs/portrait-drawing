@@ -18,6 +18,7 @@ camera's colour cast.
 """
 
 import argparse
+import base64
 import itertools
 import json
 import math
@@ -32,6 +33,13 @@ TAG_MM = (85.0, 57.0)
 # Mat brightness is fitted as a smooth surface; a sheet must stand this far
 # above it. The Cricut grid lines reach about 26, a dim tag border over 30.
 BRIGHT_ABOVE_MAT = 29
+# A black mat is grey and reads below this lightness (0-255) even under glare,
+# which lifts parts of it to 135; sheets read 200 and up.
+MAT_DARK_L = 160
+MAT_CHROMA = 12
+BLACK_MAT_MEDIAN_L = 105
+MIN_DARK_MAT_FRACTION = 0.2
+BLACK_MAT_SHEET_L = 170
 # Smallest sheet, in pixels of area, so grid squares and scraps are ignored.
 MIN_SHEET_PX = 8000
 MIN_RECT_FILL = 0.9
@@ -54,16 +62,32 @@ def read_image(data):
 
 
 def mat_region(lab):
-    """The mat: the big region that isn't the reddish wooden table around it."""
-    mat = (lab[..., 1] < 134).astype(np.uint8) * 255
-    mat = cv2.morphologyEx(mat, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
-    contours, _ = cv2.findContours(mat, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, None
-    hull = cv2.convexHull(max(contours, key=cv2.contourArea))
-    inside = np.zeros(mat.shape, np.uint8)
+    """The mat: a black one if most of the view is dark, else the big region
+    that isn't the reddish wooden table around a green one."""
+    # Grey, not too bright: a black mat even where glare lifts it, but not the
+    # yellowish wood around it or the white sheets on it.
+    neutral = (np.abs(lab[..., 1] - 128) < MAT_CHROMA) & (np.abs(lab[..., 2] - 128) < MAT_CHROMA)
+    dark = (neutral & (lab[..., 0] < MAT_DARK_L)).astype(np.uint8) * 255
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    biggest = max(contours, key=cv2.contourArea) if contours else None
+    black = biggest is not None and cv2.contourArea(biggest) >= MIN_DARK_MAT_FRACTION * dark.size
+    if black:
+        region = np.zeros(dark.shape, np.uint8)
+        cv2.drawContours(region, [biggest], -1, 255, -1)
+        # A pale grey-green cutting mat is grey enough to pass too; black reads darker.
+        black = np.median(lab[..., 0][(region > 0) & (dark > 0)]) < BLACK_MAT_MEDIAN_L
+    if not black:
+        mat = (lab[..., 1] < 134).astype(np.uint8) * 255
+        mat = cv2.morphologyEx(mat, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+        contours, _ = cv2.findContours(mat, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None, False
+        biggest = max(contours, key=cv2.contourArea)
+    hull = cv2.convexHull(biggest)
+    inside = np.zeros(lab.shape[:2], np.uint8)
     cv2.drawContours(inside, [hull], -1, 255, -1)
-    return hull, cv2.erode(inside, np.ones((9, 9), np.uint8))
+    return hull, cv2.erode(inside, np.ones((9, 9), np.uint8)), black
 
 
 def mat_background(lightness, inside):
@@ -194,12 +218,38 @@ def find_logo(gray, mask, template):
     return best
 
 
+def find_logo_square(gray, mask, template, corners):
+    """find_logo on the tag turned square to the image first: the template
+    matches only at whole quarter turns, and a tag lying at an angle between
+    them scored too low to be read the right way up."""
+    edge = corners[1] - corners[0]
+    deg = math.degrees(math.atan2(edge[1], edge[0]))
+    deg = (deg + 45) % 90 - 45
+    centre = tuple(float(v) for v in corners.mean(0))
+    turn = cv2.getRotationMatrix2D(centre, deg, 1.0)
+    h, w = gray.shape
+    logo = find_logo(cv2.warpAffine(gray, turn, (w, h), flags=cv2.INTER_LINEAR, borderValue=0),
+                     cv2.warpAffine(mask, turn, (w, h), flags=cv2.INTER_NEAREST), template)
+    if logo is None:
+        return None
+    back = cv2.invertAffineTransform(turn)
+    x, y, bw, bh = logo["box"]
+    box = np.array([[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]], float)
+    box = box @ back[:, :2].T + back[:, 2]
+    bx, by = box.min(0)
+    ex, ey = box.max(0)
+    logo["box"] = [int(bx), int(by), int(math.ceil(ex - bx)), int(math.ceil(ey - by))]
+    logo["up"] = tuple(float(v) for v in back[:, :2] @ np.array(logo["up"]))
+    logo["rotation"] = int(round((logo["rotation"] - deg) % 360))
+    return logo
+
+
 def ink_strokes(lightness, mask, px_per_mm, exclude=None):
     """Dark marks inside mask: (long side, short side) in mm for each one."""
     if not mask.any():
         return []
     paper = np.median(lightness[mask > 0])
-    dark = ((lightness < paper * 0.6) & (mask > 0)).astype(np.uint8) * 255
+    dark = ((lightness < paper * 0.7) & (mask > 0)).astype(np.uint8) * 255
     if exclude is not None:
         x, y, w, h = exclude
         pad = int(2 * px_per_mm)
@@ -220,11 +270,19 @@ def find_sheets(img, template):
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(float)
     lightness = lab[..., 0]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    hull, inside = mat_region(lab)
+    hull, inside, black = mat_region(lab)
     if hull is None:
-        return {"sheets": [], "mat_px": []}
-    bg = mat_background(lightness, inside)
-    bright = (((lightness - bg) > BRIGHT_ABOVE_MAT) & (inside > 0)).astype(np.uint8) * 255
+        return {"sheets": [], "rejected": [], "mat_px": []}
+    if black:
+        # Glare lifts parts of a black mat to 80 or more, sharper than a smooth
+        # fit follows, but a sheet's border stays far above it.
+        # A tag's label can be no brighter than glare on the mat, but the mat is
+        # grey and a label is coloured.
+        chroma = np.hypot(lab[..., 1] - 128, lab[..., 2] - 128)
+        above = (lightness > BLACK_MAT_SHEET_L) | ((lightness > 100) & (chroma >= MAT_CHROMA))
+    else:
+        above = (lightness - mat_background(lightness, inside)) > BRIGHT_ABOVE_MAT
+    bright = (above & (inside > 0)).astype(np.uint8) * 255
     bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     # Fill each outline (a tag's label is darker than its border), then open with
     # a big kernel: solid sheets survive, thin lines touching them don't.
@@ -235,13 +293,20 @@ def find_sheets(img, template):
     # Every boundary pixel is kept: the corner fit needs points along each side.
     contours, _ = cv2.findContours(solid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-    sheets = []
+    sheets, rejected = [], []
+
+    def reject(c, reason):
+        if cv2.contourArea(c) >= MIN_SHEET_PX / 4:
+            rejected.append({"reason": reason, "outline_px": cv2.approxPolyDP(c, 2, True).reshape(-1, 2).tolist()})
+
     for c in contours:
         area = cv2.contourArea(c)
         if area < MIN_SHEET_PX:
+            reject(c, "too small")
             continue
         (_, _), (rw, rh), _ = cv2.minAreaRect(c)
         if area / (rw * rh) < MIN_RECT_FILL:
+            reject(c, "not rectangular")
             continue
         filled = np.zeros(solid.shape, np.uint8)
         cv2.drawContours(filled, [c], -1, 255, -1)
@@ -260,7 +325,7 @@ def find_sheets(img, template):
         # Keep ink checks off the sheet's edge, where the border meets the mat.
         interior = cv2.erode(filled, np.ones((int(3 * px_per_mm) | 1,) * 2, np.uint8))
         if kind == "name_tag":
-            logo = find_logo(gray, interior, template)
+            logo = find_logo_square(gray, interior, template, corners)
             if logo and logo["score"] >= LOGO_MIN_SCORE:
                 corners = reading_order(corners, np.array(logo["up"]))
                 sheet["logo"] = {"rotation": logo["rotation"], "score": round(logo["score"], 2), "box_px": logo["box"]}
@@ -282,7 +347,42 @@ def find_sheets(img, template):
             sheet["used"] = len(strokes) >= USED_CARD_STROKES
         sheet["corners_px"] = [[round(float(x), 2), round(float(y), 2)] for x, y in corners]
         sheets.append(sheet)
-    return {"sheets": sheets, "mat_px": hull.reshape(-1, 2).tolist()}
+    return {"sheets": sheets, "rejected": rejected, "mat_px": hull.reshape(-1, 2).tolist()}
+
+
+def annotate(img, found):
+    """The photo with what was found drawn on it: the mat in blue, fresh sheets
+    green, used ones red, near-misses yellow, and a dot on each sheet's first
+    corner (the top left the drawer writes from)."""
+    out = img.copy()
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+    if found.get("mat_px"):
+        cv2.polylines(out, [np.array(found["mat_px"], np.int32)], True, (255, 128, 0), 2)
+    for r in found.get("rejected", []):
+        pts = np.array(r["outline_px"], np.int32)
+        cv2.polylines(out, [pts], True, (0, 220, 255), 2)
+        x, y = pts.min(0)
+        cv2.putText(out, r["reason"], (int(x), int(y) - 6), font, scale, (0, 220, 255), thick)
+    for s in found.get("sheets", []):
+        pts = np.array(s["corners_px"], np.int32)
+        colour = (0, 0, 255) if s.get("used") else (0, 200, 0)
+        cv2.polylines(out, [pts], True, colour, 3)
+        cv2.circle(out, tuple(int(v) for v in pts[0]), 7, colour, -1)
+        if s["kind"] == "name_tag":
+            logo = s.get("logo")
+            detail = f"logo {logo['score']}" if logo else "no logo"
+            label = f"name tag, {'used' if s.get('used') else 'fresh'}, {detail}"
+        else:
+            label = f"card, {'used' if s.get('used') else 'fresh'}, {s.get('strokes', 0)} strokes"
+        cx, cy = pts.mean(0).astype(int)
+        (w, h), _ = cv2.getTextSize(label, font, scale, thick)
+        org = (int(cx - w / 2), int(cy + h / 2))
+        cv2.putText(out, label, org, font, scale, (0, 0, 0), thick + 3)
+        cv2.putText(out, label, org, font, scale, colour, thick)
+    ok, png = cv2.imencode(".png", out)
+    if not ok:
+        raise SystemExit("could not encode the annotated image")
+    return base64.b64encode(png.tobytes()).decode()
 
 
 def find_crosses(img, min_px=8, max_px=80):
@@ -300,10 +400,15 @@ def find_crosses(img, min_px=8, max_px=80):
             continue
         if not 0.6 <= w / h <= 1.6 or area / (w * h) > 0.5:
             continue
-        # A plus sign's arms run through its middle row and column.
-        mid_row = labels[y + h // 2, x:x + w] == i
-        mid_col = labels[y:y + h, x + w // 2] == i
-        if mid_row.mean() < 0.5 or mid_col.mean() < 0.5:
+        # A plus sign's arms run through its middle row and column; a band, as a
+        # fine-tipped pen's 1-2 px lines rarely fall on the exact middle pixel.
+        band = max(2, min(w, h) // 8)
+        rows = labels[y + h // 2 - band:y + h // 2 + band + 1, x:x + w] == i
+        cols = labels[y:y + h, x + w // 2 - band:x + w // 2 + band + 1] == i
+        mid_row, mid_col = rows.any(0), cols.any(1)
+        # Most of both: where cards meet, their dark gaps make L and T shapes
+        # that run only half of one.
+        if mid_row.mean() < 0.75 or mid_col.mean() < 0.75:
             continue
         out.append([round(float(centroids[i][0]), 2), round(float(centroids[i][1]), 2)])
     return out
@@ -312,37 +417,56 @@ def find_crosses(img, min_px=8, max_px=80):
 def fit_homography(image_points, arm_points, tol_px=6.0):
     """Match each arm point to the cross it drew and fit image -> arm.
 
-    Which cross is which isn't known, and a symmetric pattern would match
-    itself turned or mirrored, so every assignment of the four most spread arm
-    points to four detected crosses is tried; the one that explains the most
-    other crosses wins.
+    Which cross is which isn't known, so assignments of four well-spread arm
+    points to four detected crosses are tried, and the one that explains the
+    most other crosses wins. More than one set of four is tried, since a cross
+    that came out too faint to find leaves its point nothing to match. A camera
+    looking down sees the mat mirrored relative to the arm's frame, so a match
+    that isn't mirrored is refused: a symmetric layout fits its own mirror
+    image just as well.
     """
     img = np.asarray(image_points, float)
     arm = np.asarray(arm_points, float)
     if len(arm) < 4 or len(img) < 4:
         raise SystemExit("need at least four crosses and four arm points")
-    anchors = max(itertools.combinations(range(len(arm)), 4),
-                  key=lambda q: cv2.contourArea(cv2.convexHull(arm[list(q)].astype(np.float32))))
-    src = arm[list(anchors)].astype(np.float32)
+
+    def signed_area(q):
+        x, y = q[:, 0], q[:, 1]
+        return 0.5 * float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+
+    def hull_area(q):
+        return cv2.contourArea(cv2.convexHull(arm[list(q)].astype(np.float32)))
+
+    quads = sorted(itertools.combinations(range(len(arm)), 4), key=hull_area, reverse=True)
+    quads = [q for q in quads if hull_area(q) >= 0.25 * hull_area(quads[0])][:12]
     best = None
-    for perm in itertools.permutations(range(len(img)), 4):
-        dst = img[list(perm)].astype(np.float32)
-        try:
-            h = cv2.getPerspectiveTransform(src, dst)
-        except cv2.error:
-            continue
-        projected = cv2.perspectiveTransform(arm.reshape(-1, 1, 2), h).reshape(-1, 2)
-        if not np.all(np.isfinite(projected)):
-            continue
-        d = np.linalg.norm(projected[:, None, :] - img[None, :, :], axis=2)
-        match = d.argmin(1)
-        ok = d[np.arange(len(arm)), match] < tol_px
-        # One cross per arm point.
-        if len(set(match[ok])) != ok.sum():
-            continue
-        score = (ok.sum(), -d[np.arange(len(arm)), match][ok].sum())
-        if best is None or score > best[0]:
-            best = (score, match, ok)
+    for anchors in quads:
+        src = arm[list(anchors)].astype(np.float32)
+        # Order the anchors around their hull so their signed area means something.
+        centre = src.mean(0)
+        order = np.argsort(np.arctan2(src[:, 1] - centre[1], src[:, 0] - centre[0]))
+        anchors = [anchors[k] for k in order]
+        src = src[order]
+        for perm in itertools.permutations(range(len(img)), 4):
+            dst = img[list(perm)].astype(np.float32)
+            if signed_area(src) * signed_area(dst) >= 0:
+                continue
+            try:
+                h = cv2.getPerspectiveTransform(src, dst)
+            except cv2.error:
+                continue
+            projected = cv2.perspectiveTransform(arm.reshape(-1, 1, 2), h).reshape(-1, 2)
+            if not np.all(np.isfinite(projected)):
+                continue
+            d = np.linalg.norm(projected[:, None, :] - img[None, :, :], axis=2)
+            match = d.argmin(1)
+            ok = d[np.arange(len(arm)), match] < tol_px
+            # One cross per arm point.
+            if len(set(match[ok])) != ok.sum():
+                continue
+            score = (ok.sum(), -d[np.arange(len(arm)), match][ok].sum())
+            if best is None or score > best[0]:
+                best = (score, match, ok)
     if best is None or best[0][0] < 4:
         raise SystemExit("could not match the crosses to the arm points")
     _, match, ok = best
@@ -366,6 +490,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sheets")
     s.add_argument("--logo", default=str(DEFAULT_LOGO))
+    s.add_argument("--annotate", action="store_true", help="add the photo with what was found drawn on it")
     c = sub.add_parser("crosses")
     c.add_argument("--min-px", type=int, default=8)
     c.add_argument("--max-px", type=int, default=80)
@@ -377,7 +502,10 @@ def main():
         template = cv2.imread(a.logo, cv2.IMREAD_GRAYSCALE)
         if template is None:
             raise SystemExit(f"could not read the logo template {a.logo}")
-        out = find_sheets(read_image(data), template)
+        img = read_image(data)
+        out = find_sheets(img, template)
+        if a.annotate:
+            out["annotated_png_b64"] = annotate(img, out)
     elif a.cmd == "crosses":
         out = {"crosses": find_crosses(read_image(data), a.min_px, a.max_px)}
     else:

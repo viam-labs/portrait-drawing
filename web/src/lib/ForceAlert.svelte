@@ -2,7 +2,20 @@
   import type { DrawerStatus } from '../client'
   let { status, onresume }: { status: DrawerStatus | null; onresume: () => void } = $props()
 
-  const tripped = $derived(status?.state === 'failed' && status.fault === 'excess_force')
+  const alerts: Record<string, { title: string; body: string; action: string }> = {
+    excess_force: {
+      title: 'Take the cap off the marker',
+      body: 'The pen met resistance before it should have reached the paper, so the drawing stopped and the arm moved clear.',
+      action: 'Cap is off — resume',
+    },
+    pressing_too_hard: {
+      title: 'The pen pressed too hard',
+      body: 'The pen pushed into the paper harder than it should, so the drawing stopped and the arm moved clear. Check the sheet is lying flat and the paper height is right.',
+      action: 'Paper checked — resume',
+    },
+  }
+  const alert = $derived(status?.state === 'failed' && status.fault ? alerts[status.fault] : undefined)
+  const tripped = $derived(alert !== undefined)
   let resuming = $state(false)
   $effect(() => {
     if (!tripped) resuming = false
@@ -17,15 +30,12 @@
 {#if tripped}
   <section role="alert">
     <div>
-      <strong>Take the cap off the marker</strong>
-      <p>
-        The pen pressed harder than a bare tip should, so the drawing stopped and
-        the arm moved clear of the paper.
-      </p>
+      <strong>{alert?.title}</strong>
+      <p>{alert?.body}</p>
       {#if status?.last_error}<p class="detail">{status.last_error}</p>{/if}
     </div>
     {#if status?.resumable}
-      <button onclick={resume} disabled={resuming}>{resuming ? 'Resuming…' : 'Cap is off — resume'}</button>
+      <button onclick={resume} disabled={resuming}>{resuming ? 'Resuming…' : alert?.action}</button>
     {/if}
   </section>
 {/if}

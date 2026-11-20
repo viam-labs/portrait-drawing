@@ -45,7 +45,7 @@ def test_card_corners_run_clockwise_from_a_short_top_edge():
 def test_tag_reads_from_its_logo():
     by_kind, _ = sheets_of(MAT)
     tag = by_kind["name_tag"]
-    assert tag["logo"]["rotation"] == 180
+    assert abs(tag["logo"]["rotation"] - 180) <= 5
     # Upside down in the image, so its top-left is the image's bottom-right.
     tl = np.array(tag["corners_px"][0])
     centre = np.mean(tag["corners_px"], 0)
@@ -56,7 +56,7 @@ def test_turning_the_photo_turns_the_tag_reading():
     turned = cv2.rotate(MAT, cv2.ROTATE_90_CLOCKWISE)
     by_kind, _ = sheets_of(turned)
     tag = by_kind["name_tag"]
-    assert tag["logo"]["rotation"] == 270
+    assert abs(tag["logo"]["rotation"] - 270) <= 5
     tl = np.array(tag["corners_px"][0])
     centre = np.mean(tag["corners_px"], 0)
     # The original top-left (image bottom-right) turns to the bottom-left.
@@ -134,3 +134,52 @@ def test_cli_sheets_round_trip():
     out = subprocess.run([sys.executable, str(HERE / "find_paper.py"), "sheets"], input=raw,
                          capture_output=True, check=True)
     assert len(json.loads(out.stdout)["sheets"]) == 2
+
+
+
+def test_a_black_mat_with_tilted_tags():
+    found = find_sheets(cv2.imread(str(HERE / "testdata" / "black_mat.jpg")),
+                        cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
+    tags = [s for s in found if s["kind"] == "name_tag"]
+    cards = [s for s in found if s["kind"] == "card"]
+    assert len(tags) == 8
+    assert all(t["logo"] and t["logo"]["score"] > 0.6 for t in tags)
+    # The fifth card has a corner hidden under the arm's shadow.
+    assert len(cards) == 4
+    assert not any(s["used"] for s in found)
+
+
+def test_crosses_on_cards_on_a_black_mat():
+    found = find_crosses(cv2.imread(str(HERE / "testdata" / "crosses_black_mat.jpg")))
+    # Eight drawn; one has a faint arm. The L and T shapes where cards meet are not crosses.
+    assert len(found) == 7
+    assert all(400 < x < 1100 or 300 < x < 400 for x, _ in found)
+
+
+def test_fit_refuses_the_mirror_image_of_a_symmetric_layout():
+    # A 3-2-3 layout with its far corner's cross missing fits its own mirror
+    # image to a fraction of a millimetre; only the unmirrored match is right.
+    image = [[1006.29, 214.02], [689.73, 224.38], [371.83, 228.53], [544.07, 328.39],
+             [860.36, 331.97], [694.26, 444.96], [361.87, 458.24]]
+    arm = [[387, 199], [388, 0], [392, -200], [322, 92], [319, -109], [241, 209], [246, -2], [242, -208]]
+    out = fit_homography(image, arm)
+    pairs = {tuple(m["arm"]): m["image"] for m in out["matched"]}
+    assert pairs[(387.0, 199.0)] == [371.83, 228.53]
+    assert out["unmatched_arm_points"] == [[242.0, -208.0]]
+
+
+def test_a_black_mat_under_glare():
+    # Glare lifts half the mat to the brightness of a tag's label.
+    found = find_sheets(cv2.imread(str(HERE / "testdata" / "black_mat_glare.jpg")),
+                        cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
+    assert sorted(s["kind"] for s in found) == ["card", "name_tag"]
+    assert not any(s["used"] for s in found)
+
+
+def test_a_written_name_tag_is_used():
+    # Fine blue script on a yellow label under the mat's lights: the name drawn
+    # just before must count, or the next job writes over it.
+    found = find_sheets(cv2.imread(str(HERE / "testdata" / "written_tag.jpg")),
+                        cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
+    tags = [s for s in found if s["kind"] == "name_tag"]
+    assert len(tags) == 1 and tags[0]["used"]

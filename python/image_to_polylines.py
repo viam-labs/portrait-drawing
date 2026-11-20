@@ -459,6 +459,56 @@ def polylines_to_mm(
     return out
 
 
+def _length(p: np.ndarray) -> float:
+    return float(np.linalg.norm(np.diff(p, axis=0), axis=1).sum())
+
+
+def order_strokes(strokes: list[np.ndarray]) -> list[np.ndarray]:
+    """Order strokes nearest-first from the paper origin, flipping a stroke where
+    its far end is the nearer one, so pen-up travel stays small."""
+    out, cur, left = [], np.zeros(2), list(range(len(strokes)))
+    while left:
+        d_start = [np.linalg.norm(strokes[i][0] - cur) for i in left]
+        d_end = [np.linalg.norm(strokes[i][-1] - cur) for i in left]
+        k_start, k_end = int(np.argmin(d_start)), int(np.argmin(d_end))
+        flip = d_end[k_end] < d_start[k_start]
+        i = left.pop(k_end if flip else k_start)
+        p = strokes[i][::-1] if flip else strokes[i]
+        out.append(p)
+        cur = p[-1]
+    return out
+
+
+def join_strokes(strokes: list[np.ndarray], join_mm: float) -> list[np.ndarray]:
+    """Draw consecutive strokes as one where the next starts within `join_mm` of
+    where the last ended: a gap that small is under the pen's own line width,
+    and every pen lift costs the arm about a second."""
+    out = []
+    for p in strokes:
+        if out and np.linalg.norm(p[0] - out[-1][-1]) <= join_mm:
+            out[-1] = np.vstack([out[-1], p[1:]])
+        else:
+            out.append(p)
+    return out
+
+
+def finish_strokes(
+    polylines_mm: list, max_strokes: int, join_mm: float,
+) -> list[list[list[float]]]:
+    """Order, join and cap strokes so a drawing fits the arm's time budget.
+
+    Drawing time goes almost entirely with the number of pen lifts, so beyond
+    `max_strokes` (0 for no cap) the shortest strokes go first: they carry the
+    least of the picture for the same second of arm time each.
+    """
+    strokes = [np.asarray(p, float) for p in polylines_mm if len(p) >= 2]
+    strokes = join_strokes(order_strokes(strokes), join_mm)
+    if max_strokes and len(strokes) > max_strokes:
+        keep = sorted(np.argsort([-_length(p) for p in strokes], kind="stable")[:max_strokes])
+        strokes = join_strokes(order_strokes([strokes[i] for i in keep]), join_mm)
+    return [[[round(float(x), 2), round(float(y), 2)] for x, y in p] for p in strokes]
+
+
 def image_bytes_to_polylines(
     image_bytes: bytes,
     paper_width_mm: float,
@@ -486,6 +536,8 @@ def image_bytes_to_polylines(
     min_depth_mm: float = 0.0,
     style: str = "lines",
     min_face_fraction: float = 0.12,
+    max_strokes: int = 110,
+    join_mm: float = 0.75,
 ) -> list[list[list[float]]]:
     """Decode image bytes and return paper-local mm polylines."""
     array = np.frombuffer(image_bytes, dtype=np.uint8)
@@ -496,11 +548,11 @@ def image_bytes_to_polylines(
     if style == "sketch":
         # Imported here so the default style never pays for MediaPipe at startup.
         import sketch_style
-        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img, min_face_fraction)
+        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img, min_face_fraction, max_strokes)
         if auto_rotate:
             rotate = _rotation_for_paper(crop_w, crop_h, paper_width_mm, paper_height_mm)
         mm = polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
-        return sketch_style.simplify_and_order(mm)
+        return sketch_style.simplify_and_order(mm, max_strokes=max_strokes, join_mm=join_mm)
     if style != "lines":
         raise ValueError(f"style must be 'lines' or 'sketch' (got {style!r})")
 
@@ -527,9 +579,8 @@ def image_bytes_to_polylines(
         img, size=size, clahe_clip=clahe, sigma=sigma, low=low, high=high,
         prune=prune, min_len=min_len, smooth=smooth, min_dist=min_dist, roi=roi,
     )
-    return polylines_to_mm(
-        polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror,
-    )
+    mm = polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
+    return finish_strokes(mm, max_strokes, join_mm)
 
 
 def main() -> int:
@@ -563,6 +614,10 @@ def main() -> int:
                    help="lines: trace the photo directly; sketch: cartoonize, then a cleaned-up hand-sketch look")
     p.add_argument("--min-face-fraction", type=float, default=0.12,
                    help="sketch only: reject photos whose largest face is narrower than this share of the shorter side")
+    p.add_argument("--max-strokes", type=int, default=110,
+                   help="keep at most this many strokes, dropping the shortest; 0 for no cap")
+    p.add_argument("--join-mm", type=float, default=0.75,
+                   help="draw consecutive strokes as one where they are this close")
     args = p.parse_args()
 
     image_bytes = sys.stdin.buffer.read()
@@ -598,6 +653,8 @@ def main() -> int:
             auto_rotate=args.auto_rotate,
             style=args.style,
             min_face_fraction=args.min_face_fraction,
+            max_strokes=args.max_strokes,
+            join_mm=args.join_mm,
         )
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)

@@ -21,7 +21,9 @@ const (
 	// baselineHeightMM is above the paper by more than a marker cap adds, so a
 	// capped pen is still in the air when the baseline is taken.
 	baselineHeightMM = 40.0
-	faultExcessForce = "excess_force"
+	// excess_force predates pressing_too_hard and means the cap case only.
+	faultExcessForce  = "excess_force"
+	faultPressingHard = "pressing_too_hard"
 	// frozenPolls is how many polls in a row may read exactly the same before the
 	// sensor counts as frozen: about half a second, far longer than a live
 	// sensor's noise ever holds still.
@@ -179,6 +181,8 @@ func (s *forceStats) summary() map[string]interface{} {
 type forceRun struct {
 	baseline        float64
 	lifted, penDown forceStats
+	// stroke is the current pen-down move's share of penDown.
+	stroke forceStats
 	// last and repeats track identical raw readings across moves, since a
 	// frozen sensor stays frozen from one move to the next.
 	last    float64
@@ -200,6 +204,7 @@ func (r *forceRun) record(clear bool, force float64) {
 		return
 	}
 	r.penDown.record(force)
+	r.stroke.record(force)
 }
 
 func (r *forceRun) summary() map[string]interface{} {
@@ -245,12 +250,12 @@ func (e *frozenForceError) Error() string {
 }
 
 func (e *excessForceError) Error() string {
-	where := "with the pen on the paper"
 	if e.clear {
-		where = "before the pen should have reached the paper"
+		return fmt.Sprintf("force %.3g over its baseline exceeded %.3g before the pen should have reached the paper; "+
+			"take the cap off the marker, then resume", e.force, e.limit)
 	}
-	return fmt.Sprintf("force %.3g over its baseline exceeded %.3g %s; take the cap off the marker, then resume",
-		e.force, e.limit, where)
+	return fmt.Sprintf("force %.3g over its baseline exceeded %.3g with the pen on the paper; "+
+		"the pen is pressing too hard: check the paper's height, and that the sheet is lying flat", e.force, e.limit)
 }
 
 // guardedMove is planAndExecuteThrough with the force watched for the whole
@@ -388,8 +393,11 @@ func guardStopped(err error) bool {
 
 func faultOf(err error) string {
 	var excess *excessForceError
-	if errors.As(err, &excess) {
+	if !errors.As(err, &excess) {
+		return ""
+	}
+	if excess.clear {
 		return faultExcessForce
 	}
-	return ""
+	return faultPressingHard
 }

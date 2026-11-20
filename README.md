@@ -59,6 +59,7 @@ DoCommand, no image data passing through your hands.
 | `line_tolerance_mm` | number | no | How far a pen-on-paper move may stray from its straight line, up and down included. Default 0.5; a rigid pen needs about 0.05. |
 | `stroke_speed_degs_per_sec`, `stroke_acceleration_degs_per_sec_per_sec` | number | no | Cap the arm while the pen is on the paper or going onto it; travel between strokes runs at the arm's own. A `draw` may carry its own. |
 | `touch_off` | object | no | Find the paper by touching it before each drawing. See [Finding the paper by touch](#finding-the-paper-by-touch). |
+| `pen_force` | object | no | Keep each stroke's force in a range by adjusting the pen's depth as it draws. See [`pen_force`](#pen_force). |
 
 Each stroke, from pen-down through its last point to pen-up, is planned and run
 as one motion, so the arm moves through its points without stopping at each.
@@ -146,7 +147,7 @@ before the pen is all the way down, and it pushes back harder once it is there.
 | `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units, measured from the baseline below. Set it a little above the most you see in a normal drawing. |
 | `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
 | `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
-| `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off. Without it the arm goes to `home_pose`. |
+| `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off, and after every finished drawing, so the sheet can be taken. Without it the arm goes to `home_pose`. |
 
 A wrist sensor reads the weight of the pen holder and its own bias even with
 nothing touching — tens of newtons is normal. So every draw and every `resume`
@@ -167,8 +168,14 @@ The sensor is polled every 20 ms through every move of a drawing. Each descent
 is made in two moves, down to the margin and then onto the paper, so the limit
 changes at a known height. When a limit is passed the arm stops, lifts the pen
 straight up, and goes to `retreat_pose`, or else the rest pose. `status` then reports the job as
-`failed` with `"fault": "excess_force"`, and it stays resumable: take the cap
-off and send `resume`, which redraws the stroke that tripped. A sensor that
+`failed` with a `fault` that says which limit was passed, and it stays
+resumable: `resume` redraws the stroke that tripped.
+
+| `fault` | Limit passed | What to do before `resume` |
+|---|---|---|
+| `excess_force` | `contact_force`, before the pen should have reached the paper | Take the cap off the marker. |
+| `pressing_too_hard` | `max_force`, with the pen on the paper, or during [touch off](#finding-the-paper-by-touch) | Check the sheet is lying flat and the paper height is right. |
+ A sensor that
 cannot be read fails the drawing the same way, without the `fault`, since an
 unreadable guard is not guarding anything.
 
@@ -199,7 +206,8 @@ the arm still, where the wrist sensor is precise:
 "touch_off": { "force": 0.8, "press_mm": 0.2 }
 ```
 
-At three points spanning what it is about to draw, the pen stops 1 mm above the
+At three of the drawing's own points, spanning as much of it as they can, so
+each touch lands on the sheet and its dot is drawn over, the pen stops 1 mm above the
 paper's configured height, takes a still reading, and steps down until the force
 reaches `force`: 0.2 mm at a time, then 0.05 mm once it first feels the paper,
 so a stiff surface is not overshot. The height is interpolated between the last
@@ -216,16 +224,43 @@ sheet keeps its plane.
 | `step_mm`, `fine_step_mm` | number | no | Steps before and after the pen first feels the paper. Default 0.2 and 0.05. |
 | `max_depth_mm` | number | no | How far below the configured height a touch may go before it gives up. Default 1.5. |
 
-It needs `force_guard`. Every move down is guarded as in a drawing, so a capped
+It needs `force_guard`. The arm crosses between touches 40 mm above the paper
+and comes straight down to each, since a free move that also descends can dip
+below its end on the way. It zeroes the force only once two readings in a row
+agree, since the reading drifts for a moment after that drop. Every move down is guarded as in a drawing, so a capped
 pen meets the paper on its way to the start of a touch and trips there; the lift
 after each touch is not, since moving away can only ease the force. A touch that
 feels nothing, or a plane steeper than 1 mm per 100 mm, fails the drawing. The
 log reports each touch and the plane's slope.
 
+### `pen_force`
+
+Touch-off puts the pen at the right depth to start with; `pen_force` keeps it
+there. After each stroke the drawer averages the force over it. Below `min`, the
+pen goes `step_mm` deeper for the strokes that follow and the stroke is drawn
+once more; above `max`, it goes `step_mm` shallower. One stroke's average holds
+hundreds of readings, so it sees past the 1–3 N jolts of a moving arm that no
+single reading can. Strokes under 20 mm are not judged: much of their move is
+the pen coming down and going up, which reads light. Each drawing starts from
+its own touch-off, with no adjustment.
+
+```json
+"pen_force": { "min": 1.2, "max": 3.0 }
+```
+
+| Attribute | Type | Required | Description |
+|---|---|---|---|
+| `min`, `max` | number | yes | The range a stroke's mean force over the baseline must stay in. A moving arm reads about 0.8 N with the pen in the air, so `min` goes above that. `max` must be below `force_guard.max_force`. |
+| `step_mm` | number | no | How far the pen moves after a stroke out of range. Default 0.1. |
+| `max_adjust_mm` | number | no | The most it moves either way in all. Default 0.5. |
+
+It needs `force_guard`. The log reports each stroke out of range and, at the
+end, where the pen finished and how many strokes were drawn again.
+
 ### The rest pose
 
 `home_pose` is where the arm lives between drawings: it returns there when a
-drawing finishes or pauses, `go_home` sends it there, and `capture_and_draw`
+drawing pauses, or finishes without a `force_guard.retreat_pose`, `go_home` sends it there, and `capture_and_draw`
 moves there before triggering the photo so the arm is out of the camera's view.
 Teach it by jogging the arm to where it should park and copying the tool pose
 from the arm's card in the app:
@@ -381,7 +416,8 @@ so this is how you find out what is happening — or whether anything is.
 `state` moves through `idle` → `moving_to_home_pose` → `capturing` →
 `generating_strokes` → `drawing` → `done`, or ends at `canceled` or `failed`
 (with `last_error`, and `fault` when the cause is one a person can clear, such
-as `excess_force` from the [`force_guard`](#a-cap-left-on-the-marker)). The
+as `excess_force` or `pressing_too_hard` from the
+[`force_guard`](#a-cap-left-on-the-marker)). The
 counts appear once drawing starts.
 
 Readable while a drawing is in flight: `executeDraw` holds the draw slot but not
@@ -450,6 +486,8 @@ Every attribute is optional; the defaults are tuned for portraits.
 |---|---|---|
 | `style` | string | `lines` (default) traces the photo directly. `sketch` draws a cleaner, hand-sketched portrait — see [The sketch style](#the-sketch-style). The attributes below tune `lines` only. |
 | `min_face_fraction` | number | `sketch` only. Rejects a photo whose largest face is narrower than this share of the photo's shorter side, so an empty frame returns an error instead of drawing a face from the background. Default `0.12`. |
+| `max_strokes` | int | Both styles. Caps the number of strokes, since each one costs the arm about a second of pen lift and travel. The shortest go first; in `sketch` the landmark-drawn eyes, lips, brows and glasses are always kept. Default `110`; `0` removes the cap. `python/estimate_draw_time.py` estimates drawing time for a polyline set. |
+| `join_mm` | number | Both styles. Draws consecutive strokes as one where the next starts within this distance of where the last ended. Default `0.75`. |
 | `size` | int | Long side, in pixels, the model sees. Larger recovers finer features — lashes, nostrils — at a roughly linear cost in strokes. Default `768`. |
 | `clahe` | number | Local contrast lift before the model runs. Default `2.0`; `0` disables. |
 | `sigma` | number | Smoothing of the model response before ridges are traced. Default `2.2`. |
@@ -739,7 +777,8 @@ A tag reads the way its Viam logo does, wherever the logo sits on the label.
 
 Pixels become arm positions through a homography fitted by `calibrate`: the
 drawer draws a small cross at each of `calibration_points` on paper laid over
-the mat, and the finder photographs them from the survey pose and matches each
+the mat, each as a drawing of its own so it touches off on its own sheet, and
+the finder photographs them from the survey pose and matches each
 cross to the point that drew it. The fit is saved in the module's data
 directory, so it survives restarts; run it again when the mat, the camera or
 the survey pose moves. A new pen holder that keeps the pen on the same axis
@@ -768,15 +807,29 @@ calibration too, which then takes the offset into account.
 | `camera` | string | **yes** | The camera that photographs the mat. |
 | `source_name` | string | no | Which of the camera's images to use when it returns several, such as a RealSense's `color`. |
 | `survey_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to before every photo, so the camera sees the mat from where it was calibrated. |
+| `view_camera` | string | no | A `viam:frame-buffer:camera` that each `look` and `find` shows its photo on, with the mat outlined in blue, fresh sheets green, used ones red, near-misses yellow and labelled why, and a dot on each sheet's first corner. Open it in the CONTROL tab. |
 | `drawer` | string | for `calibrate` | The drawer that draws the calibration crosses. |
 | `tool_orientation` | orientation | **yes** | The pen-down orientation every returned paper carries. |
 | `pen_down_z` | number | **yes** | The arm's Z with the pen tip on the mat. |
 | `calibration_points` | array | for `calibrate` | At least 5 arm X/Y positions spread across the camera's view, on paper. An uneven layout is fine: the crosses are matched to points by position, not by order. |
-| `cross_mm` | number | no | Calibration cross size. Default 10. |
+| `cross_mm` | number | no | Calibration cross size. Default 10. The detector needs a cross at least 16 px across in the survey photo; from a high survey pose that takes 20–25 mm. |
 | `near` | position | no | What "nearest" means when sorting sheets. Default the arm's base. |
 | `card_width_mm`, `card_height_mm` | number | no | Default 101.6 x 152.4 (4 x 6 in). |
 | `name_tag_width_mm`, `name_tag_height_mm` | number | no | The label's writing area, inside its white backing. Default 82 x 53. |
 | `max_size_error_mm` | number | no | How far a sheet's measured size may be from its kind's before it is rejected as something else. Default 10. |
+
+### `look`
+
+Photographs the mat and reports the sheets it sees, in pixels, without needing
+a calibration: the way to check detection on a new mat or under new light.
+
+```json
+{"look": {}}
+```
+
+With `view_camera` set the picture goes there; without it, the response carries
+it as `annotated_png_b64`. `rejected` lists bright shapes that were not taken
+for sheets, and why.
 
 ### `find`
 

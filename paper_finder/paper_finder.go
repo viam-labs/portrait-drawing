@@ -65,6 +65,9 @@ type Config struct {
 	// SurveyPose is an arm-position-saver switch the arm goes to before every
 	// photo, so the camera always sees the mat from where it was calibrated.
 	SurveyPose string `json:"survey_pose,omitempty"`
+	// ViewCamera is a viam:frame-buffer:camera each look and find shows its
+	// photo on, with what it found drawn over it.
+	ViewCamera string `json:"view_camera,omitempty"`
 	// Drawer draws the calibration crosses.
 	Drawer string `json:"drawer,omitempty"`
 	// ToolOrientation is the pen-down orientation every paper is drawn with.
@@ -124,6 +127,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.Drawer != "" {
 		deps = append(deps, cfg.Drawer)
+	}
+	if cfg.ViewCamera != "" {
+		deps = append(deps, cfg.ViewCamera)
 	}
 	return deps, nil, nil
 }
@@ -185,6 +191,7 @@ type paperFinder struct {
 	camera      imager
 	survey      mover
 	drawer      commander
+	view        commander
 	run         runner
 	orientation map[string]interface{}
 	calPath     string
@@ -231,7 +238,16 @@ func newPaperFinder(
 	if dataDir == "" {
 		dataDir = moduleRoot
 	}
-	return newWithClients(conf.ResourceName(), logger, cfg, cam, survey, drawer, run, dataDir)
+	f, err := newWithClients(conf.ResourceName(), logger, cfg, cam, survey, drawer, run, dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ViewCamera != "" {
+		if f.view, err = camera.FromProvider(deps, cfg.ViewCamera); err != nil {
+			return nil, fmt.Errorf("paper-finder: get view_camera %q: %w", cfg.ViewCamera, err)
+		}
+	}
+	return f, nil
 }
 
 func newWithClients(
@@ -281,12 +297,14 @@ func (f *paperFinder) DoCommand(ctx context.Context, cmd map[string]interface{})
 	switch v {
 	case "find":
 		return f.find(ctx, cmd["find"])
+	case "look":
+		return f.look(ctx)
 	case "calibrate":
 		return f.calibrate(ctx, cmd["calibrate"])
 	case "status":
 		return f.Status(ctx)
 	default:
-		return nil, fmt.Errorf("paper-finder: unknown verb %q; expected \"find\", \"calibrate\", or \"status\"", v)
+		return nil, fmt.Errorf("paper-finder: unknown verb %q; expected \"find\", \"look\", \"calibrate\", or \"status\"", v)
 	}
 }
 
@@ -359,11 +377,7 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 	if f.cal == nil {
 		return nil, errors.New("paper-finder: not calibrated; run calibrate first")
 	}
-	img, err := f.photo(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("paper-finder: %w", err)
-	}
-	stdout, err := f.run(ctx, img, "sheets")
+	stdout, err := f.detect(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("paper-finder: %w", err)
 	}
@@ -389,7 +403,7 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 		}
 		out, reason := f.place(s, near)
 		if reason != "" {
-			rejected = append(rejected, map[string]interface{}{"kind": s.Kind, "reason": reason, "corners_px": s.CornersPx})
+			rejected = append(rejected, map[string]interface{}{"kind": s.Kind, "reason": reason, "corners_px": pixelList(s.CornersPx)})
 			continue
 		}
 		if s.Used && !a.IncludeUsed {
@@ -400,7 +414,73 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 	sort.SliceStable(sheets, func(i, j int) bool {
 		return sheets[i]["distance_mm"].(float64) < sheets[j]["distance_mm"].(float64)
 	})
-	return map[string]interface{}{"sheets": sheets, "rejected": rejected}, nil
+	// Plain []interface{}: a queue in the same module gets this map as it is,
+	// not through structpb, and reads lists as []interface{} as it would off the wire.
+	return map[string]interface{}{"sheets": anyList(sheets), "rejected": anyList(rejected)}, nil
+}
+
+// detect photographs the mat and finds the sheets on it, in pixels, showing
+// the result on view_camera when there is one.
+func (f *paperFinder) detect(ctx context.Context) ([]byte, error) {
+	img, err := f.photo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if f.view == nil {
+		return f.run(ctx, img, "sheets")
+	}
+	stdout, err := f.run(ctx, img, "sheets", "--annotate")
+	if err != nil {
+		return nil, err
+	}
+	var annotated struct {
+		PNG string `json:"annotated_png_b64"`
+	}
+	if err := json.Unmarshal(stdout, &annotated); err == nil && annotated.PNG != "" {
+		if _, err := f.view.DoCommand(ctx, map[string]interface{}{
+			"set_image": map[string]interface{}{"image_b64": annotated.PNG, "source_name": "paper-view"},
+		}); err != nil {
+			// The view is for people watching; losing it is no reason to stop finding paper.
+			f.logger.Warnf("paper-finder: could not show the view on %q: %v", f.cfg.ViewCamera, err)
+		}
+	}
+	return stdout, nil
+}
+
+// look shows what the finder sees, in pixels, without needing a calibration.
+func (f *paperFinder) look(ctx context.Context) (map[string]interface{}, error) {
+	stdout, err := f.detect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("paper-finder: %w", err)
+	}
+	var found map[string]interface{}
+	if err := json.Unmarshal(stdout, &found); err != nil {
+		return nil, fmt.Errorf("paper-finder: parse python output: %w", err)
+	}
+	if f.view != nil {
+		delete(found, "annotated_png_b64")
+		found["view_camera"] = f.cfg.ViewCamera
+	}
+	delete(found, "mat_px")
+	return found, nil
+}
+
+func anyList(maps []map[string]interface{}) []interface{} {
+	out := make([]interface{}, len(maps))
+	for i, m := range maps {
+		out[i] = m
+	}
+	return out
+}
+
+// pixelList is pts as a DoCommand response can carry them: structpb takes
+// slices, not fixed-size arrays.
+func pixelList(pts [][2]float64) []interface{} {
+	out := make([]interface{}, len(pts))
+	for i, p := range pts {
+		out[i] = []interface{}{p[0], p[1]}
+	}
+	return out
 }
 
 // place turns a sheet's pixel corners into arm coordinates and a drawer paper
@@ -445,7 +525,7 @@ func (f *paperFinder) place(s pySheet, near r3.Vector) (map[string]interface{}, 
 		"center":      vec(r3.Vector{X: centre.X, Y: centre.Y, Z: z}),
 		"distance_mm": math.Hypot(centre.X-near.X, centre.Y-near.Y),
 		"measured_mm": []float64{measuredW, measuredH},
-		"corners_px":  s.CornersPx,
+		"corners_px":  pixelList(s.CornersPx),
 		"paper": map[string]interface{}{
 			"top_left_corner":  map[string]interface{}{"translation": vec(tl), "orientation": f.orientation},
 			"top_right_corner": vec(tr),
@@ -485,17 +565,19 @@ func (f *paperFinder) calibrate(ctx context.Context, payload interface{}) (map[s
 		return nil, errors.New("paper-finder: calibration_points is not set")
 	}
 	if a.Redraw == nil || *a.Redraw {
-		draw, err := f.crossesDrawCommand()
+		draws, err := f.crossDrawCommands()
 		if err != nil {
 			return nil, fmt.Errorf("paper-finder: %w", err)
 		}
-		f.logger.Infof("paper-finder: drawing %d calibration crosses", len(f.cfg.CalibrationPoints))
-		resp, err := f.drawer.DoCommand(ctx, draw)
-		if err != nil {
-			return nil, fmt.Errorf("paper-finder: draw calibration crosses: %w", err)
-		}
-		if paused, _ := resp["paused"].(bool); paused {
-			return nil, errors.New("paper-finder: the drawer was paused while drawing the calibration crosses")
+		for i, draw := range draws {
+			f.logger.Infof("paper-finder: drawing calibration cross %d of %d", i+1, len(draws))
+			resp, err := f.drawer.DoCommand(ctx, draw)
+			if err != nil {
+				return nil, fmt.Errorf("paper-finder: draw calibration cross %d: %w", i+1, err)
+			}
+			if paused, _ := resp["paused"].(bool); paused {
+				return nil, errors.New("paper-finder: the drawer was paused while drawing the calibration crosses")
+			}
 		}
 	}
 	img, err := f.photo(ctx)
@@ -552,41 +634,34 @@ func (f *paperFinder) calibrate(ctx context.Context, payload interface{}) (map[s
 	}, nil
 }
 
-// crossesDrawCommand lays the crosses out on one page that spans the
-// calibration points, which the drawer draws like any other paper.
-func (f *paperFinder) crossesDrawCommand() (map[string]interface{}, error) {
+// crossDrawCommands is one draw per cross, each on its own small page around
+// its point: the crosses go on separate sheets, which on a soft mat sit at
+// heights a single touched plane through three of them does not fit.
+func (f *paperFinder) crossDrawCommands() ([]map[string]interface{}, error) {
 	if f.drawer == nil {
 		return nil, errors.New("drawer is not set")
 	}
-	pts := f.cfg.CalibrationPoints
 	half := f.cfg.CrossMM / 2
 	margin := half + 5
-	minX, maxX, minY, maxY := pts[0].X, pts[0].X, pts[0].Y, pts[0].Y
-	for _, p := range pts[1:] {
-		minX, maxX = math.Min(minX, p.X), math.Max(maxX, p.X)
-		minY, maxY = math.Min(minY, p.Y), math.Max(maxY, p.Y)
-	}
-	// The page's top-left is its smallest X and largest Y, running +X across and -Y down.
-	left, top := minX-margin, maxY+margin
-	polylines := make([]interface{}, 0, 2*len(pts))
-	for _, p := range pts {
-		x, y := p.X-left, top-p.Y
-		polylines = append(polylines,
-			[]interface{}{[]float64{x - half, y}, []float64{x + half, y}},
-			[]interface{}{[]float64{x, y - half}, []float64{x, y + half}},
-		)
-	}
-	return map[string]interface{}{"draw": map[string]interface{}{
-		"polylines": polylines,
-		"paper": map[string]interface{}{
-			"top_left_corner": map[string]interface{}{
-				"translation": map[string]interface{}{"x": left, "y": top, "z": *f.cfg.PenDownZ},
-				"orientation": f.orientation,
+	out := make([]map[string]interface{}, 0, len(f.cfg.CalibrationPoints))
+	for _, p := range f.cfg.CalibrationPoints {
+		// The page's top-left is its smallest X and largest Y, running +X across and -Y down.
+		out = append(out, map[string]interface{}{"draw": map[string]interface{}{
+			"polylines": []interface{}{
+				[]interface{}{[]float64{margin - half, margin}, []float64{margin + half, margin}},
+				[]interface{}{[]float64{margin, margin - half}, []float64{margin, margin + half}},
 			},
-			"width_mm":  maxX - minX + 2*margin,
-			"height_mm": maxY - minY + 2*margin,
-		},
-	}}, nil
+			"paper": map[string]interface{}{
+				"top_left_corner": map[string]interface{}{
+					"translation": map[string]interface{}{"x": p.X - margin, "y": p.Y + margin, "z": *f.cfg.PenDownZ},
+					"orientation": f.orientation,
+				},
+				"width_mm":  2 * margin,
+				"height_mm": 2 * margin,
+			},
+		}})
+	}
+	return out, nil
 }
 
 func (f *paperFinder) Status(_ context.Context) (map[string]interface{}, error) {

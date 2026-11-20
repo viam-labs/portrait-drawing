@@ -82,6 +82,7 @@ type Config struct {
 	InputRangeOverride map[string]map[string]referenceframe.Limit `json:"input_range_override,omitempty"`
 	ForceGuard         *ForceGuardConfig                          `json:"force_guard,omitempty"`
 	TouchOff           *TouchOffConfig                            `json:"touch_off,omitempty"`
+	PenForce           *PenForceConfig                            `json:"pen_force,omitempty"`
 	// StrokeSpeedDegsPerSec and StrokeAccelerationDegsPerSecPerSec cap the arm
 	// while the pen is on the paper or going onto it; travel between strokes
 	// runs at the arm's own. A draw may carry its own. 0 leaves the arm's.
@@ -260,6 +261,11 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.TouchOff != nil {
 		if err := cfg.TouchOff.validate(cfg.ForceGuard); err != nil {
+			return nil, nil, err
+		}
+	}
+	if cfg.PenForce != nil {
+		if err := cfg.PenForce.validate(cfg.ForceGuard); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1116,9 +1122,13 @@ type waypoint struct {
 
 // drawMove is one planned, uninterrupted motion through one or more points.
 type drawMove struct {
-	points       []r3.Vector
-	linear       bool
-	clear        bool
+	points []r3.Vector
+	linear bool
+	clear  bool
+	// stroke is pen-down through pen-up, the moves pen_force judges.
+	stroke bool
+	// contactMM is how far a stroke runs with the pen on the paper.
+	contactMM    float64
 	endsPolyline bool
 	label        string
 }
@@ -1144,11 +1154,13 @@ func strokeMoves(wps []waypoint) []drawMove {
 			linear: wp.linear, clear: wp.clear, endsPolyline: wp.endsPolyline, label: wp.label,
 		}
 		if wp.contact {
+			mv.stroke = true
 			mv.label = strings.TrimSuffix(wp.label, " pen-down") + " stroke"
 			for i+1 < len(wps) && (wps[i+1].contact || wps[i+1].endsPolyline) {
 				i++
 				next := r3.Vector{X: wps[i].x, Y: wps[i].y, Z: wps[i].z}
 				if wps[i].contact {
+					mv.contactMM += mv.points[len(mv.points)-1].Distance(next)
 					mv.points = append(mv.points, along(mv.points[len(mv.points)-1], next, maxStrokeStepMM)...)
 				}
 				mv.points = append(mv.points, next)
@@ -1248,8 +1260,9 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	waypoints := drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear)
 	run := &forceRun{}
 	defer d.finishForceRun(run)
+	var above spatialmath.Pose
 	if len(waypoints) > 0 {
-		above := spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
+		above = spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
 		run.baseline, err = d.forceBaseline(ctx, fs, above)
 		if err != nil {
 			wrapped := fmt.Errorf("drawer: %w", err)
@@ -1263,7 +1276,13 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	}
 
 	if d.cfg.TouchOff != nil && d.forceGuard != nil && len(waypoints) > 0 {
-		plane, err := d.paperPlane(ctx, fs, run, polylines, startAt, paper, zDown, zUp)
+		plane, err := d.paperPlane(ctx, fs, run, polylines, startAt, paper, zDown)
+		if err == nil {
+			// Back over the first stroke, so the approach to it comes straight down.
+			if err = d.guardedMove(ctx, fs, []spatialmath.Pose{above}, run, false, true, nil); err != nil {
+				err = fmt.Errorf("return over the first stroke: %w", err)
+			}
+		}
 		if err != nil {
 			wrapped := fmt.Errorf("drawer: %w", err)
 			if guardStopped(err) && ctx.Err() == nil {
@@ -1281,14 +1300,29 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		onPlane(waypoints, plane, zDown, d.cfg.TouchOff.withDefaults().pressMM())
 	}
 
-	for _, mv := range strokeMoves(waypoints) {
+	var pf *penForce
+	if d.cfg.PenForce != nil && d.forceGuard != nil {
+		pf = &penForce{cfg: d.cfg.PenForce.withDefaults()}
+		defer d.finishPenForce(pf)
+	}
+	moves := strokeMoves(waypoints)
+	polyStart, redrawn := -1, false
+	for m := 0; m < len(moves); m++ {
+		mv := moves[m]
+		if (m == 0 || moves[m-1].endsPolyline) && m != polyStart {
+			polyStart, redrawn = m, false
+		}
 		// Only pen-contact moves are held to a straight line. Travel moves span
 		// the whole workspace, and a linear plan that far has no direct solution
 		// — cbirrt, which would find one, is not allowed under a linear constraint.
 		targets := make([]spatialmath.Pose, len(mv.points))
 		for i, p := range mv.points {
+			if pf != nil && mv.stroke && (!mv.endsPolyline || i != len(mv.points)-1) {
+				p.Z += pf.offset
+			}
 			targets[i] = spatialmath.NewPose(p, orientation)
 		}
+		run.stroke = forceStats{}
 		var options *arm.MoveOptions
 		if mv.linear {
 			options = paper.stroke.moveOptions()
@@ -1310,6 +1344,20 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 				d.setFailed(wrapped)
 			}
 			return nil, wrapped
+		}
+		if pf != nil && mv.stroke && mv.contactMM >= minJudgedStrokeMM {
+			before := pf.offset
+			verdict := pf.judge(run.stroke)
+			if verdict == penLight || verdict == penHeavy {
+				d.logger.Infof("drawer: %s mean force %.2f N, outside %g–%g; pen now %+.2f mm",
+					mv.label, run.stroke.mean(), pf.cfg.Min, pf.cfg.Max, pf.offset)
+			}
+			if verdict == penLight && !redrawn && pf.offset != before && run.stroke.samples >= minPenForceSamples {
+				redrawn = true
+				pf.redrawn++
+				m = polyStart - 1
+				continue
+			}
 		}
 		if !mv.endsPolyline {
 			continue
@@ -1344,11 +1392,11 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	d.logger.Infof("drawer: finished %d polylines in %s", len(polylines), time.Since(startedAt).Round(time.Second))
 	d.hold(nil, 0, surface{})
 
-	if d.hasRestPose() {
-		if err := d.goToRestPose(ctx, fs); err != nil {
-			d.setFailed(err)
-			return nil, fmt.Errorf("drawer: return to rest pose: %w", err)
-		}
+	// park: a finished sheet is taken away by hand, so the arm waits where a
+	// person can reach it.
+	if err := d.park(ctx, fs); err != nil {
+		d.setFailed(err)
+		return nil, fmt.Errorf("drawer: park: %w", err)
 	}
 	d.setPhase(phaseDone)
 

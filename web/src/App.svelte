@@ -3,7 +3,7 @@
   import type { RobotClient } from '@viamrobotics/sdk'
   import { lookedFor, machineTarget } from './machine'
   import { connect, drawerStatus, frameURL, resumeDrawing, type DrawerStatus } from './client'
-  import CapAlert from './lib/CapAlert.svelte'
+  import ForceAlert from './lib/ForceAlert.svelte'
   import Panel from './lib/Panel.svelte'
   import Progress from './lib/Progress.svelte'
   import Phase from './lib/Phase.svelte'
@@ -101,7 +101,7 @@
         <p class="muted">{statusError}</p>
       </Panel>
     {/if}
-    <CapAlert {status} onresume={resume} />
+    <ForceAlert {status} onresume={resume} />
     <Progress {status} />
     <div class="grid">
       <Panel title="Photo" subtitle="what the camera captured">

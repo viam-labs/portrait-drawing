@@ -117,8 +117,8 @@ func TestWatchForce_normalForceLetsTheMoveFinish(t *testing.T) {
 func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
 	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
-	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
-	test.That(t, err.Error(), test.ShouldContainSubstring, "cap")
+	test.That(t, faultOf(err), test.ShouldEqual, faultPressingHard)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "pressing too hard")
 	test.That(t, stops.Load(), test.ShouldEqual, 1)
 }
 
@@ -137,7 +137,7 @@ func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 
 	err = d.watchForce(context.Background(), &forceRun{baseline: -12.0}, false, untilCanceled)
-	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
+	test.That(t, faultOf(err), test.ShouldEqual, faultPressingHard)
 }
 
 func TestForceRun_keepsLiftedAndPenDownApart(t *testing.T) {
@@ -203,6 +203,30 @@ func TestMeasureBaseline_averagesTheSamples(t *testing.T) {
 	test.That(t, n.Load(), test.ShouldEqual, baselineSamples)
 }
 
+func TestStillBaseline_waitsOutADrift(t *testing.T) {
+	var n atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) {
+		i := n.Add(1)
+		// Drifts 0.05 N a sample for the first 40, then holds with noise.
+		v := -18.0 + 0.05*math.Min(float64(i), 40)
+		if i%2 == 0 {
+			v += 0.02
+		}
+		return v, nil
+	})
+	baseline, err := d.stillBaseline(context.Background())
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, baseline, test.ShouldAlmostEqual, -16.0, 0.05)
+}
+
+func TestStillBaseline_givesUpOnASteadyDrift(t *testing.T) {
+	var n atomic.Int32
+	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.05 * float64(n.Add(1)), nil })
+	_, err := d.stillBaseline(context.Background())
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "kept drifting")
+}
+
 func TestMeasureBaseline_refusesAFrozenSensor(t *testing.T) {
 	d, _ := guardedDrawer(t, func() (interface{}, error) { return 0.0, nil })
 	_, err := d.forceGuard.measureBaseline(context.Background())
@@ -245,14 +269,19 @@ func TestWatchForce_withoutAGuardJustMoves(t *testing.T) {
 }
 
 func TestStatus_excessForceIsAFaultUntilDrawingRestarts(t *testing.T) {
-	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
-	d.setFailed(&excessForceError{force: 7, limit: 5})
-	s := d.status()
-	test.That(t, s["state"], test.ShouldEqual, phaseFailed)
-	test.That(t, s["fault"], test.ShouldEqual, faultExcessForce)
-	d.startDrawing(10, 100)
-	_, hasFault := d.status()["fault"]
-	test.That(t, hasFault, test.ShouldBeFalse)
+	for _, tc := range []struct {
+		clear bool
+		fault string
+	}{{true, faultExcessForce}, {false, faultPressingHard}} {
+		d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
+		d.setFailed(&excessForceError{force: 7, limit: 5, clear: tc.clear})
+		s := d.status()
+		test.That(t, s["state"], test.ShouldEqual, phaseFailed)
+		test.That(t, s["fault"], test.ShouldEqual, tc.fault)
+		d.startDrawing(10, 100)
+		_, hasFault := d.status()["fault"]
+		test.That(t, hasFault, test.ShouldBeFalse)
+	}
 }
 
 func TestWatchForce_aFrozenSensorStopsTheMove(t *testing.T) {
