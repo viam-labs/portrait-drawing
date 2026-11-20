@@ -3,10 +3,11 @@ package paperfinder
 import (
 	"context"
 	"encoding/json"
-	"go.viam.com/utils/protoutils"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"go.viam.com/utils/protoutils"
 
 	"github.com/golang/geo/r3"
 	"go.viam.com/rdk/components/camera"
