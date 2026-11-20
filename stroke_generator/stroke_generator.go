@@ -236,7 +236,7 @@ type generateArgs struct {
 	AutoRotate *bool `json:"auto_rotate,omitempty"`
 }
 
-func parseGenerateArgs(payload interface{}) (*generateArgs, error) {
+func parseGenerateArgs(payload any) (*generateArgs, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
@@ -333,7 +333,7 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 	return args
 }
 
-func (s *strokeGenerator) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (s *strokeGenerator) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	v, err := verb.Single(cmd)
 	if err != nil {
 		return nil, err
@@ -346,7 +346,7 @@ func (s *strokeGenerator) DoCommand(ctx context.Context, cmd map[string]interfac
 	}
 }
 
-func (s *strokeGenerator) generate(ctx context.Context, payload interface{}) (map[string]interface{}, error) {
+func (s *strokeGenerator) generate(ctx context.Context, payload any) (map[string]any, error) {
 	a, err := parseGenerateArgs(payload)
 	if err != nil {
 		return nil, fmt.Errorf("stroke-generator: %w", err)
@@ -379,7 +379,7 @@ func (s *strokeGenerator) generate(ctx context.Context, payload interface{}) (ma
 	if err != nil {
 		return nil, fmt.Errorf("stroke-generator: %w", err)
 	}
-	var resp map[string]interface{}
+	var resp map[string]any
 	if err := json.Unmarshal(stdout, &resp); err != nil {
 		return nil, fmt.Errorf("stroke-generator: parse python output: %w", err)
 	}
@@ -404,6 +404,6 @@ func writeTemp(data []byte) (string, func(), error) {
 	return f.Name(), cleanup, nil
 }
 
-func (s *strokeGenerator) Status(_ context.Context) (map[string]interface{}, error) {
-	return map[string]interface{}{"state": "ready"}, nil
+func (s *strokeGenerator) Status(_ context.Context) (map[string]any, error) {
+	return map[string]any{"state": "ready"}, nil
 }

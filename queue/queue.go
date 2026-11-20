@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -164,8 +165,8 @@ type Job struct {
 	Paper      map[string]any `json:"paper,omitempty"`
 	SheetAt    *[2]float64    `json:"sheet_at,omitempty"`
 	CreatedAt  time.Time      `json:"created_at"`
-	StartedAt  time.Time      `json:"started_at,omitempty"`
-	FinishedAt time.Time      `json:"finished_at,omitempty"`
+	StartedAt  time.Time      `json:"started_at"`
+	FinishedAt time.Time      `json:"finished_at"`
 }
 
 type receptionQueue struct {
@@ -290,11 +291,9 @@ func (q *receptionQueue) Status(context.Context) (map[string]any, error) {
 func (q *receptionQueue) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	q.cancel = cancel
-	q.workers.Add(1)
-	go func() {
-		defer q.workers.Done()
+	q.workers.Go(func() {
 		q.run(ctx)
-	}()
+	})
 	q.nudge(q.wake)
 }
 
@@ -769,9 +768,7 @@ func withPaper(cmd, paper map[string]any) map[string]any {
 			continue
 		}
 		withSheet := make(map[string]any, len(args)+1)
-		for k, val := range args {
-			withSheet[k] = val
-		}
+		maps.Copy(withSheet, args)
 		withSheet["paper"] = paper
 		out[v] = withSheet
 	}

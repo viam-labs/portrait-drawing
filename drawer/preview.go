@@ -32,11 +32,11 @@ func renderPreviewPNG(polylines []Polyline, paperWidthMM, paperHeightMM, pxPerMM
 		img.Pix[i] = 255
 	}
 	border := color.Gray{Y: previewBorderLum}
-	for x := 0; x < w; x++ {
+	for x := range w {
 		img.SetGray(x, 0, border)
 		img.SetGray(x, h-1, border)
 	}
-	for y := 0; y < h; y++ {
+	for y := range h {
 		img.SetGray(0, y, border)
 		img.SetGray(w-1, y, border)
 	}

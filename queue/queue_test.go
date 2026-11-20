@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +35,7 @@ type fakeDrawer struct {
 	steps      chan struct{}
 	stopped    chan struct{}
 	calls      []string
-	draws      []map[string]interface{}
+	draws      []map[string]any
 	failOnDraw error
 	// pauseGate, when set, holds a pause call back until it is closed, like a
 	// pause still in flight.
@@ -45,15 +46,15 @@ func newFakeDrawer() *fakeDrawer {
 	return &fakeDrawer{steps: make(chan struct{}), stopped: make(chan struct{}, 10)}
 }
 
-func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	for v, args := range cmd {
 		f.mu.Lock()
 		f.calls = append(f.calls, v)
 		f.mu.Unlock()
 		switch v {
 		case "draw":
-			a := args.(map[string]interface{})
-			polylines := a["polylines"].([]interface{})
+			a := args.(map[string]any)
+			polylines := a["polylines"].([]any)
 			start := a["start_at"].(int)
 			f.mu.Lock()
 			if f.failOnDraw != nil {
@@ -70,13 +71,13 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 				if f.done >= f.total {
 					f.running = false
 					f.mu.Unlock()
-					return map[string]interface{}{"total_points": 1}, nil
+					return map[string]any{"total_points": 1}, nil
 				}
 				if f.pauseReq {
 					f.running = false
 					next := f.done
 					f.mu.Unlock()
-					return map[string]interface{}{"paused": true, "next_polyline": next}, nil
+					return map[string]any{"paused": true, "next_polyline": next}, nil
 				}
 				f.mu.Unlock()
 				select {
@@ -101,7 +102,7 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 			f.mu.Lock()
 			if !f.running {
 				f.mu.Unlock()
-				return map[string]interface{}{"paused": false}, nil
+				return map[string]any{"paused": false}, nil
 			}
 			f.pauseReq = true
 			f.mu.Unlock()
@@ -110,15 +111,15 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 			case f.steps <- struct{}{}:
 			case <-time.After(time.Second):
 			}
-			return map[string]interface{}{"paused": true}, nil
+			return map[string]any{"paused": true}, nil
 		case "status":
 			f.mu.Lock()
 			defer f.mu.Unlock()
-			return map[string]interface{}{"polylines_done": float64(f.done)}, nil
+			return map[string]any{"polylines_done": float64(f.done)}, nil
 		case "cancel":
-			return map[string]interface{}{"canceled": true}, nil
+			return map[string]any{"canceled": true}, nil
 		case "go_home":
-			return map[string]interface{}{"status": "ok"}, nil
+			return map[string]any{"status": "ok"}, nil
 		}
 	}
 	return nil, nil
@@ -135,24 +136,24 @@ func (f *fakeDrawer) step(t *testing.T) {
 
 type fakeWriter struct {
 	mu    sync.Mutex
-	cmds  []map[string]interface{}
+	cmds  []map[string]any
 	wrote chan string
 	// block keeps the writer writing until its context ends.
 	block bool
 }
 
-func (w *fakeWriter) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (w *fakeWriter) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	w.mu.Lock()
 	w.cmds = append(w.cmds, cmd)
 	block := w.block
 	w.mu.Unlock()
-	text := cmd["write"].(map[string]interface{})["text"].(string)
+	text := cmd["write"].(map[string]any)["text"].(string)
 	w.wrote <- text
 	if block {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	return map[string]interface{}{}, nil
+	return map[string]any{}, nil
 }
 
 type fakeGenerator struct {
@@ -160,16 +161,16 @@ type fakeGenerator struct {
 	fail      error
 }
 
-func (g *fakeGenerator) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	g.lastImage = cmd["generate"].(map[string]interface{})["image_b64"].(string)
+func (g *fakeGenerator) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
+	g.lastImage = cmd["generate"].(map[string]any)["image_b64"].(string)
 	if g.fail != nil {
 		return nil, g.fail
 	}
-	polylines := []interface{}{}
-	for i := 0; i < 6; i++ {
-		polylines = append(polylines, []interface{}{[]interface{}{float64(i), 0.0}, []interface{}{float64(i), 5.0}})
+	polylines := []any{}
+	for i := range 6 {
+		polylines = append(polylines, []any{[]any{float64(i), 0.0}, []any{float64(i), 5.0}})
 	}
-	return map[string]interface{}{"polylines": polylines}, nil
+	return map[string]any{"polylines": polylines}, nil
 }
 
 type harness struct {
@@ -194,9 +195,9 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-func (h *harness) enqueue(t *testing.T, verb string, args map[string]interface{}) string {
+func (h *harness) enqueue(t *testing.T, verb string, args map[string]any) string {
 	t.Helper()
-	resp, err := h.q.DoCommand(context.Background(), map[string]interface{}{verb: args})
+	resp, err := h.q.DoCommand(context.Background(), map[string]any{verb: args})
 	test.That(t, err, test.ShouldBeNil)
 	return resp["job_id"].(string)
 }
@@ -253,7 +254,7 @@ func (h *harness) waitDrawing(t *testing.T) {
 func TestPortraitIsDrawnAndThePhotoIsNotKept(t *testing.T) {
 	h := newHarness(t)
 	h.q.start()
-	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "SECRET-PHOTO", "name": "Ada"})
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "SECRET-PHOTO", "name": "Ada"})
 	test.That(t, h.gen.lastImage, test.ShouldEqual, "SECRET-PHOTO")
 
 	h.waitDrawing(t)
@@ -273,12 +274,12 @@ func TestPortraitIsDrawnAndThePhotoIsNotKept(t *testing.T) {
 
 func TestNameTagsGoBeforeWaitingPortraits(t *testing.T) {
 	h := newHarness(t)
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace Hopper"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Grace Hopper"})
 
 	st := h.q.status()
-	waiting := st["waiting"].([]interface{})
-	test.That(t, waiting[0].(map[string]interface{})["kind"], test.ShouldEqual, kindNameTag)
+	waiting := st["waiting"].([]any)
+	test.That(t, waiting[0].(map[string]any)["kind"], test.ShouldEqual, kindNameTag)
 
 	h.q.start()
 	select {
@@ -294,9 +295,9 @@ func TestNameTagsGoBeforeWaitingPortraits(t *testing.T) {
 
 func TestTextJobIsWrittenWithItsOwnSizingBeforePortraits(t *testing.T) {
 	h := newHarness(t)
-	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
-	id := h.enqueue(t, "enqueue_text", map[string]interface{}{
-		"text": " Welcome ", "cap_height_mm": 12.0, "preview": true, "visitor": map[string]interface{}{"id": "v1"},
+	h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_text", map[string]any{
+		"text": " Welcome ", "cap_height_mm": 12.0, "preview": true, "visitor": map[string]any{"id": "v1"},
 	})
 
 	s, err := h.q.jobSummary(id)
@@ -315,8 +316,8 @@ func TestTextJobIsWrittenWithItsOwnSizingBeforePortraits(t *testing.T) {
 	h.waitState(t, id, stateDone)
 	h.writer.mu.Lock()
 	defer h.writer.mu.Unlock()
-	test.That(t, h.writer.cmds[0], test.ShouldResemble, map[string]interface{}{
-		"write": map[string]interface{}{"text": "Welcome", "cap_height_mm": 12.0},
+	test.That(t, h.writer.cmds[0], test.ShouldResemble, map[string]any{
+		"write": map[string]any{"text": "Welcome", "cap_height_mm": 12.0},
 	})
 }
 
@@ -325,12 +326,12 @@ func TestNameTagPausesThePortraitThenItResumesWhereItStopped(t *testing.T) {
 	// A paused portrait keeps its sheet, so it resumes with no swap after the tag.
 	h.q.paperSwapWait = time.Hour
 	h.q.start()
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitDrawing(t)
 	h.drawer.step(t)
 	h.drawer.step(t)
 
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	select {
 	case name := <-h.writer.wrote:
 		test.That(t, name, test.ShouldEqual, "Ada")
@@ -351,7 +352,7 @@ func TestNameTagPausesThePortraitThenItResumesWhereItStopped(t *testing.T) {
 func TestARestartResumesAnInterruptedPortrait(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "queue.json")
 	job := &Job{ID: "abc", Kind: kindPortrait, State: stateActive, NextPolyline: 4, CreatedAt: time.Now()}
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		job.Polylines = append(job.Polylines, [][2]float64{{float64(i), 0}, {float64(i), 5}})
 	}
 	raw, _ := json.Marshal([]*Job{job})
@@ -385,7 +386,7 @@ func TestFailedPortraitCanBeRetriedFromWhereItStopped(t *testing.T) {
 	h := newHarness(t)
 	h.drawer.failOnDraw = errPlan
 	h.q.start()
-	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitState(t, id, stateFailed)
 	s, _ := h.q.jobSummary(id)
 	test.That(t, s["error"], test.ShouldContainSubstring, "no plan")
@@ -393,7 +394,7 @@ func TestFailedPortraitCanBeRetriedFromWhereItStopped(t *testing.T) {
 	h.drawer.mu.Lock()
 	h.drawer.failOnDraw = nil
 	h.drawer.mu.Unlock()
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"retry_job": map[string]interface{}{"job_id": id}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"retry_job": map[string]any{"job_id": id}})
 	test.That(t, err, test.ShouldBeNil)
 	h.waitDrawing(t)
 }
@@ -406,8 +407,8 @@ func (*planError) Error() string { return "no plan" }
 
 func TestCancelAQueuedJob(t *testing.T) {
 	h := newHarness(t)
-	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
-	resp, err := h.q.DoCommand(context.Background(), map[string]interface{}{"cancel_job": map[string]interface{}{"job_id": id}})
+	id := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	resp, err := h.q.DoCommand(context.Background(), map[string]any{"cancel_job": map[string]any{"job_id": id}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, resp["state"], test.ShouldEqual, stateCanceled)
 	test.That(t, h.q.status()["waiting"], test.ShouldBeEmpty)
@@ -415,33 +416,33 @@ func TestCancelAQueuedJob(t *testing.T) {
 
 func TestEnqueueValidation(t *testing.T) {
 	h := newHarness(t)
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_portrait": map[string]interface{}{}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"enqueue_portrait": map[string]any{}})
 	test.That(t, err, test.ShouldNotBeNil)
-	_, err = h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_name_tag": map[string]interface{}{"name": "  "}})
+	_, err = h.q.DoCommand(context.Background(), map[string]any{"enqueue_name_tag": map[string]any{"name": "  "}})
 	test.That(t, err, test.ShouldNotBeNil)
-	_, err = h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_text": map[string]interface{}{"text": "  "}})
+	_, err = h.q.DoCommand(context.Background(), map[string]any{"enqueue_text": map[string]any{"text": "  "}})
 	test.That(t, err, test.ShouldNotBeNil)
-	_, err = h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_text": map[string]interface{}{"text": "Hi", "fill": "big"}})
+	_, err = h.q.DoCommand(context.Background(), map[string]any{"enqueue_text": map[string]any{"text": "Hi", "fill": "big"}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "fill")
 
 	noWriter := newWithClients(generic.Named("q"), logging.NewTestLogger(t), newFakeDrawer(), &fakeGenerator{}, nil, &Config{},
 		filepath.Join(t.TempDir(), "q.json"))
-	_, err = noWriter.DoCommand(context.Background(), map[string]interface{}{"enqueue_name_tag": map[string]interface{}{"name": "Ada"}})
+	_, err = noWriter.DoCommand(context.Background(), map[string]any{"enqueue_name_tag": map[string]any{"name": "Ada"}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "name_tag_writer")
-	_, err = noWriter.DoCommand(context.Background(), map[string]interface{}{"enqueue_text": map[string]interface{}{"text": "Hi"}})
+	_, err = noWriter.DoCommand(context.Background(), map[string]any{"enqueue_text": map[string]any{"text": "Hi"}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "name_tag_writer")
 }
 
 func TestNameTagCommandTemplate(t *testing.T) {
-	cmd := map[string]interface{}{"write": map[string]interface{}{"text": "{name}", "lines": []interface{}{"Hi {name}", 3.0}}}
-	got := fillName(cmd, "Ada").(map[string]interface{})
-	write := got["write"].(map[string]interface{})
+	cmd := map[string]any{"write": map[string]any{"text": "{name}", "lines": []any{"Hi {name}", 3.0}}}
+	got := fillName(cmd, "Ada").(map[string]any)
+	write := got["write"].(map[string]any)
 	test.That(t, write["text"], test.ShouldEqual, "Ada")
-	test.That(t, write["lines"], test.ShouldResemble, []interface{}{"Hi Ada", 3.0})
-	test.That(t, cmd["write"].(map[string]interface{})["text"], test.ShouldEqual, "{name}")
+	test.That(t, write["lines"], test.ShouldResemble, []any{"Hi Ada", 3.0})
+	test.That(t, cmd["write"].(map[string]any)["text"], test.ShouldEqual, "{name}")
 }
 
 func TestConfigValidate(t *testing.T) {
@@ -452,7 +453,7 @@ func TestConfigValidate(t *testing.T) {
 	for _, bad := range []*Config{
 		{StrokeGenerator: "gen"},
 		{Drawer: "drawer"},
-		{Drawer: "drawer", StrokeGenerator: "gen", NameTagCommand: map[string]interface{}{"write": nil}},
+		{Drawer: "drawer", StrokeGenerator: "gen", NameTagCommand: map[string]any{"write": nil}},
 		{Drawer: "drawer", StrokeGenerator: "gen", MarginMM: -1},
 	} {
 		_, _, err := bad.Validate("")
@@ -465,7 +466,7 @@ var _ resource.Resource = (*receptionQueue)(nil)
 // fakePhoto is a frame-buffer camera: it holds a picture until cleared.
 func fakePhoto(held []byte) (*inject.Camera, *[]byte) {
 	cam := inject.NewCamera("photo")
-	cam.ImagesFunc = func(context.Context, []string, map[string]interface{}) ([]camera.NamedImage, resource.ResponseMetadata, error) {
+	cam.ImagesFunc = func(context.Context, []string, map[string]any) ([]camera.NamedImage, resource.ResponseMetadata, error) {
 		if held == nil {
 			return nil, resource.ResponseMetadata{}, errors.New("frame-buffer: no image")
 		}
@@ -476,11 +477,11 @@ func fakePhoto(held []byte) (*inject.Camera, *[]byte) {
 		color, err := camera.NamedImageFromBytes(held, "color", rutils.MimeTypeJPEG, data.Annotations{})
 		return []camera.NamedImage{depth, color}, resource.ResponseMetadata{}, err
 	}
-	cam.DoFunc = func(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	cam.DoFunc = func(_ context.Context, cmd map[string]any) (map[string]any, error) {
 		if _, ok := cmd["clear"]; ok {
 			held = nil
 		}
-		return map[string]interface{}{}, nil
+		return map[string]any{}, nil
 	}
 	return cam, &held
 }
@@ -489,11 +490,11 @@ func TestPortraitFromThePhotoCameraClearsIt(t *testing.T) {
 	h := newHarness(t)
 	cam, held := fakePhoto([]byte("VISITOR"))
 	h.q.photo = cam
-	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_portrait", map[string]any{"name": "Ada"})
 	test.That(t, h.gen.lastImage, test.ShouldEqual, base64.StdEncoding.EncodeToString([]byte("VISITOR")))
 	test.That(t, *held, test.ShouldBeNil)
 
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_portrait": map[string]interface{}{}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"enqueue_portrait": map[string]any{}})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 
@@ -502,7 +503,7 @@ func TestARejectedPhotoIsClearedToo(t *testing.T) {
 	cam, held := fakePhoto([]byte("POSTER"))
 	h.q.photo = cam
 	h.gen.fail = errors.New("face is too small")
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"enqueue_portrait": map[string]interface{}{}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"enqueue_portrait": map[string]any{}})
 	test.That(t, err.Error(), test.ShouldContainSubstring, "face is too small")
 	test.That(t, *held, test.ShouldBeNil)
 	test.That(t, h.q.status()["waiting"], test.ShouldBeEmpty)
@@ -513,10 +514,10 @@ func TestALatePauseLandsBeforeTheNameTagStarts(t *testing.T) {
 	gate := make(chan struct{})
 	h.drawer.pauseGate = gate
 	h.q.start()
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitDrawing(t)
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
-	for i := 0; i < 6; i++ {
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	for range 6 {
 		h.drawer.step(t)
 	}
 	select {
@@ -537,9 +538,9 @@ func TestCancelStopsANameTagBeingWritten(t *testing.T) {
 	h := newHarness(t)
 	h.writer.block = true
 	h.q.start()
-	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	id := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	<-h.writer.wrote
-	resp, err := h.q.DoCommand(context.Background(), map[string]interface{}{"cancel_job": map[string]interface{}{"job_id": id}})
+	resp, err := h.q.DoCommand(context.Background(), map[string]any{"cancel_job": map[string]any{"job_id": id}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, resp["state"], test.ShouldEqual, stateCanceled)
 	h.drawer.mu.Lock()
@@ -549,7 +550,7 @@ func TestCancelStopsANameTagBeingWritten(t *testing.T) {
 	h.writer.mu.Lock()
 	h.writer.block = false
 	h.writer.mu.Unlock()
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Grace"})
 	select {
 	case name := <-h.writer.wrote:
 		test.That(t, name, test.ShouldEqual, "Grace")
@@ -568,7 +569,7 @@ func TestARestartFailsAnInterruptedNameTagInsteadOfRewritingIt(t *testing.T) {
 func TestARestartFailsAnInterruptedTextCardInsteadOfRewritingIt(t *testing.T) {
 	restartFailsAnInterruptedCard(t, &Job{
 		ID: "tag", Kind: kindText, State: stateActive, CreatedAt: time.Now(),
-		Write: map[string]interface{}{"text": "Welcome"},
+		Write: map[string]any{"text": "Welcome"},
 	})
 }
 
@@ -598,13 +599,13 @@ func restartFailsAnInterruptedCard(t *testing.T, job *Job) {
 func TestCardsInARowWaitForTheCardSwap(t *testing.T) {
 	h := newHarness(t)
 	h.q.paperSwapWait = 300 * time.Millisecond
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
-	h.enqueue(t, "enqueue_text", map[string]interface{}{"text": "Welcome"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	h.enqueue(t, "enqueue_text", map[string]any{"text": "Welcome"})
 	h.q.start()
 
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
 	start := time.Now()
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"status": map[string]interface{}{}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"status": map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, time.Since(start), test.ShouldBeLessThan, 100*time.Millisecond)
 	select {
@@ -619,8 +620,8 @@ func TestCardsInARowWaitForTheCardSwap(t *testing.T) {
 func TestAPortraitAfterACardDoesNotWait(t *testing.T) {
 	h := newHarness(t)
 	h.q.paperSwapWait = time.Hour
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
-	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.q.start()
 
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
@@ -631,11 +632,11 @@ func TestPortraitPaperIsSwappedEvenWithACardInBetween(t *testing.T) {
 	h := newHarness(t)
 	h.q.paperSwapWait = time.Hour
 	h.q.start()
-	first := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	first := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.drawUntil(t, first, stateDone)
 
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
-	second := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "y"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	second := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "y"})
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
 	time.Sleep(200 * time.Millisecond)
 
@@ -652,15 +653,15 @@ func TestACanceledCardIsSwappedAndCloseSkipsTheWait(t *testing.T) {
 	h.q.paperSwapWait = time.Hour
 	h.writer.block = true
 	h.q.start()
-	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	id := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	<-h.writer.wrote
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"cancel_job": map[string]interface{}{"job_id": id}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"cancel_job": map[string]any{"job_id": id}})
 	test.That(t, err, test.ShouldBeNil)
 
 	h.writer.mu.Lock()
 	h.writer.block = false
 	h.writer.mu.Unlock()
-	next := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	next := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Grace"})
 	select {
 	case name := <-h.writer.wrote:
 		t.Fatalf("%s was written on the half-written card", name)
@@ -685,7 +686,7 @@ func TestACanceledCardIsSwappedAndCloseSkipsTheWait(t *testing.T) {
 // fakeFinder hands out the sheets it is given, per kind.
 type fakeFinder struct {
 	mu     sync.Mutex
-	sheets map[string][]interface{}
+	sheets map[string][]any
 	err    error
 	calls  []string
 	// looking, when set, is told each time a search starts, and the search then
@@ -694,8 +695,8 @@ type fakeFinder struct {
 	gate    chan struct{}
 }
 
-func (f *fakeFinder) DoCommand(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	kind := cmd["find"].(map[string]interface{})["kind"].(string)
+func (f *fakeFinder) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
+	kind := cmd["find"].(map[string]any)["kind"].(string)
 	if f.looking != nil {
 		f.looking <- kind
 		<-f.gate
@@ -706,10 +707,10 @@ func (f *fakeFinder) DoCommand(_ context.Context, cmd map[string]interface{}) (m
 	if f.err != nil {
 		return nil, f.err
 	}
-	return map[string]interface{}{"sheets": f.sheets[kind]}, nil
+	return map[string]any{"sheets": f.sheets[kind]}, nil
 }
 
-func (f *fakeFinder) set(kind string, sheets ...interface{}) {
+func (f *fakeFinder) set(kind string, sheets ...any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sheets[kind] = sheets
@@ -727,25 +728,25 @@ func (f *fakeFinder) callsFor(kind string) int {
 	return n
 }
 
-func sheetAt(x, y float64) map[string]interface{} {
-	return map[string]interface{}{
-		"center": map[string]interface{}{"x": x, "y": y, "z": 280.0},
-		"paper":  map[string]interface{}{"top_left_corner": map[string]interface{}{"x": x}, "width_mm": 101.6},
+func sheetAt(x, y float64) map[string]any {
+	return map[string]any{
+		"center": map[string]any{"x": x, "y": y, "z": 280.0},
+		"paper":  map[string]any{"top_left_corner": map[string]any{"x": x}, "width_mm": 101.6},
 	}
 }
 
-func paperX(paper interface{}) float64 {
-	return paper.(map[string]interface{})["top_left_corner"].(map[string]interface{})["x"].(float64)
+func paperX(paper any) float64 {
+	return paper.(map[string]any)["top_left_corner"].(map[string]any)["x"].(float64)
 }
 
 func withFinder(h *harness) *fakeFinder {
-	f := &fakeFinder{sheets: map[string][]interface{}{}}
+	f := &fakeFinder{sheets: map[string][]any{}}
 	h.q.finder = f
 	return f
 }
 
-func needsPaper(h *harness) []interface{} {
-	n, _ := h.q.status()["needs_paper"].([]interface{})
+func needsPaper(h *harness) []any {
+	n, _ := h.q.status()["needs_paper"].([]any)
 	return n
 }
 
@@ -754,7 +755,7 @@ func (h *harness) waitNeedsPaper(t *testing.T, kind string) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, n := range needsPaper(h) {
-			if n.(map[string]interface{})["kind"] == kind {
+			if n.(map[string]any)["kind"] == kind {
 				return
 			}
 		}
@@ -768,7 +769,7 @@ func TestAPortraitIsDrawnOnTheSheetTheFinderGives(t *testing.T) {
 	f := withFinder(h)
 	f.set(sheetCard, sheetAt(120, 0), sheetAt(300, 0))
 	h.q.start()
-	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.drawUntil(t, id, stateDone)
 
 	h.drawer.mu.Lock()
@@ -781,13 +782,13 @@ func TestANameTagIsWrittenOnTheTagTheFinderGives(t *testing.T) {
 	f := withFinder(h)
 	f.set(sheetNameTag, sheetAt(200, 50))
 	h.q.start()
-	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	id := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
 	h.waitState(t, id, stateDone)
 
 	h.writer.mu.Lock()
 	defer h.writer.mu.Unlock()
-	write := h.writer.cmds[0]["write"].(map[string]interface{})
+	write := h.writer.cmds[0]["write"].(map[string]any)
 	test.That(t, write["text"], test.ShouldEqual, "Ada")
 	test.That(t, paperX(write["paper"]), test.ShouldEqual, 200.0)
 	test.That(t, f.callsFor(sheetNameTag), test.ShouldEqual, 1)
@@ -797,7 +798,7 @@ func TestWithNoSheetTheJobWaitsForResume(t *testing.T) {
 	h := newHarness(t)
 	f := withFinder(h)
 	h.q.start()
-	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitNeedsPaper(t, sheetCard)
 	s, err := h.q.jobSummary(id)
 	test.That(t, err, test.ShouldBeNil)
@@ -810,7 +811,7 @@ func TestWithNoSheetTheJobWaitsForResume(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	test.That(t, f.callsFor(sheetCard), test.ShouldEqual, calls)
 
-	out, err := h.q.DoCommand(context.Background(), map[string]interface{}{"resume": map[string]interface{}{}})
+	out, err := h.q.DoCommand(context.Background(), map[string]any{"resume": map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, out["needs_paper"], test.ShouldBeNil)
 	h.drawUntil(t, id, stateDone)
@@ -821,8 +822,8 @@ func TestAMissingTagDoesNotHoldUpAPortrait(t *testing.T) {
 	f := withFinder(h)
 	f.set(sheetCard, sheetAt(150, 0))
 	h.q.start()
-	tag := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	tag := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.drawUntil(t, portrait, stateDone)
 	h.waitNeedsPaper(t, sheetNameTag)
 	s, _ := h.q.jobSummary(tag)
@@ -834,9 +835,9 @@ func TestAFinderErrorIsReportedAndWaits(t *testing.T) {
 	f := withFinder(h)
 	f.err = errors.New("not calibrated; run calibrate first")
 	h.q.start()
-	h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitNeedsPaper(t, sheetCard)
-	n := needsPaper(h)[0].(map[string]interface{})
+	n := needsPaper(h)[0].(map[string]any)
 	test.That(t, n["error"], test.ShouldContainSubstring, "not calibrated")
 }
 
@@ -846,14 +847,14 @@ func TestAPausedPortraitKeepsItsSheetThroughANameTag(t *testing.T) {
 	f.set(sheetCard, sheetAt(120, 0))
 	f.set(sheetNameTag, sheetAt(250, 80))
 	h.q.start()
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitDrawing(t)
 	h.drawer.step(t)
 	h.drawer.step(t)
 
 	// The finder now sees a different card nearest; the portrait must not move to it.
 	f.set(sheetCard, sheetAt(60, 0))
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
 	h.drawUntil(t, portrait, stateDone)
 
@@ -870,11 +871,11 @@ func TestASheetAnUnfinishedPortraitOwnsIsNotHandedOut(t *testing.T) {
 	// The failed portrait's card has too little on it to look used.
 	h.q.jobs = []*Job{{
 		ID: "old", Kind: kindPortrait, State: stateFailed, NextPolyline: 1, Polylines: [][][2]float64{{{0, 0}, {1, 1}}, {{2, 2}, {3, 3}}},
-		Paper: sheetAt(120, 0)["paper"].(map[string]interface{}), SheetAt: &[2]float64{120, 0}, CreatedAt: time.Now(),
+		Paper: sheetAt(120, 0)["paper"].(map[string]any), SheetAt: &[2]float64{120, 0}, CreatedAt: time.Now(),
 	}}
 	f.set(sheetCard, sheetAt(121, 2), sheetAt(300, 0))
 	h.q.start()
-	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.drawUntil(t, id, stateDone)
 
 	h.drawer.mu.Lock()
@@ -888,7 +889,7 @@ func TestARetriedCardGetsAFreshTag(t *testing.T) {
 	f.set(sheetNameTag, sheetAt(200, 50))
 	h.writer.block = true
 	h.q.start()
-	id := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	id := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	<-h.writer.wrote
 	_ = h.q.Close(context.Background())
 	h.waitState(t, id, stateFailed)
@@ -897,7 +898,7 @@ func TestARetriedCardGetsAFreshTag(t *testing.T) {
 	h.writer.block = false
 	h.writer.mu.Unlock()
 	f.set(sheetNameTag, sheetAt(260, 50))
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"retry_job": map[string]interface{}{"job_id": id}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"retry_job": map[string]any{"job_id": id}})
 	test.That(t, err, test.ShouldBeNil)
 	h.q.start()
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
@@ -905,7 +906,7 @@ func TestARetriedCardGetsAFreshTag(t *testing.T) {
 
 	h.writer.mu.Lock()
 	defer h.writer.mu.Unlock()
-	last := h.writer.cmds[len(h.writer.cmds)-1]["write"].(map[string]interface{})
+	last := h.writer.cmds[len(h.writer.cmds)-1]["write"].(map[string]any)
 	test.That(t, paperX(last["paper"]), test.ShouldEqual, 260.0)
 }
 
@@ -922,9 +923,9 @@ func TestANameTagThatArrivesWhileThePortraitsCardIsFoundGoesFirst(t *testing.T) 
 	f.set(sheetNameTag, sheetAt(250, 80))
 	f.looking, f.gate = make(chan string, 4), make(chan struct{})
 	h.q.start()
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	test.That(t, <-f.looking, test.ShouldEqual, sheetCard)
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	close(f.gate)
 
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
@@ -942,13 +943,13 @@ func TestOnceTheQueueKnowsThereAreNoTagsATagDoesNotPauseThePortrait(t *testing.T
 	f := withFinder(h)
 	f.set(sheetCard, sheetAt(120, 0))
 	h.q.start()
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	h.waitNeedsPaper(t, sheetNameTag)
-	portrait := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	portrait := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitDrawing(t)
 	h.drawer.step(t)
 
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Grace"})
 	h.drawUntil(t, portrait, stateDone)
 	h.drawer.mu.Lock()
 	defer h.drawer.mu.Unlock()
@@ -956,9 +957,9 @@ func TestOnceTheQueueKnowsThereAreNoTagsATagDoesNotPauseThePortrait(t *testing.T
 	test.That(t, h.drawer.calls, test.ShouldNotContain, "pause")
 }
 
-func (h *harness) do(t *testing.T, verb string) map[string]interface{} {
+func (h *harness) do(t *testing.T, verb string) map[string]any {
 	t.Helper()
-	resp, err := h.q.DoCommand(context.Background(), map[string]interface{}{verb: map[string]interface{}{}})
+	resp, err := h.q.DoCommand(context.Background(), map[string]any{verb: map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
 	return resp
 }
@@ -966,12 +967,7 @@ func (h *harness) do(t *testing.T, verb string) map[string]interface{} {
 func (h *harness) drawerCalled(verb string) bool {
 	h.drawer.mu.Lock()
 	defer h.drawer.mu.Unlock()
-	for _, c := range h.drawer.calls {
-		if c == verb {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(h.drawer.calls, verb)
 }
 
 func expectNothingWritten(t *testing.T, w *fakeWriter) {
@@ -986,7 +982,7 @@ func expectNothingWritten(t *testing.T, w *fakeWriter) {
 func TestPauseStopsAPortraitMidStrokeAndItResumesFromThatStroke(t *testing.T) {
 	h := newHarness(t)
 	h.q.start()
-	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
 	h.waitDrawing(t)
 	h.drawer.step(t)
 	h.drawer.step(t)
@@ -1007,9 +1003,9 @@ func TestPauseStopsANameTagAndItGoesFirstOnResume(t *testing.T) {
 	h := newHarness(t)
 	h.writer.block = true
 	h.q.start()
-	ada := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	ada := h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Grace"})
 
 	h.do(t, "pause")
 	test.That(t, h.drawerCalled("cancel"), test.ShouldBeTrue)
@@ -1032,7 +1028,7 @@ func TestPauseWhileIdleHoldsNewJobsUntilResume(t *testing.T) {
 	h := newHarness(t)
 	h.q.start()
 	h.do(t, "pause")
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 	expectNothingWritten(t, h.writer)
 
 	resp := h.do(t, "resume")
@@ -1048,7 +1044,7 @@ func TestPauseWhileIdleHoldsNewJobsUntilResume(t *testing.T) {
 func TestGoHomeOnlyWhilePaused(t *testing.T) {
 	h := newHarness(t)
 	h.q.start()
-	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"go_home": map[string]interface{}{}})
+	_, err := h.q.DoCommand(context.Background(), map[string]any{"go_home": map[string]any{}})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "pause")
 	test.That(t, h.drawerCalled("go_home"), test.ShouldBeFalse)
@@ -1061,7 +1057,7 @@ func TestGoHomeOnlyWhilePaused(t *testing.T) {
 func TestAPauseSurvivesARestart(t *testing.T) {
 	h := newHarness(t)
 	h.do(t, "pause")
-	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	h.enqueue(t, "enqueue_name_tag", map[string]any{"name": "Ada"})
 
 	writer := &fakeWriter{wrote: make(chan string, 1)}
 	q := newWithClients(generic.Named("queue"), logging.NewTestLogger(t), newFakeDrawer(), &fakeGenerator{}, writer, &Config{}, h.state)

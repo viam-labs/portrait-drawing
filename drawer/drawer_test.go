@@ -118,10 +118,10 @@ func TestConfigValidate_strokeGeneratorInDeps(t *testing.T) {
 }
 
 func TestParseDrawPayload_valid(t *testing.T) {
-	payload := map[string]interface{}{
-		"polylines": []interface{}{
-			[]interface{}{[]interface{}{0.0, 0.0}, []interface{}{10.0, 5.0}},
-			[]interface{}{[]interface{}{20.0, 20.0}},
+	payload := map[string]any{
+		"polylines": []any{
+			[]any{[]any{0.0, 0.0}, []any{10.0, 5.0}},
+			[]any{[]any{20.0, 20.0}},
 		},
 	}
 	got, _, _, err := parseDrawPayload(payload)
@@ -134,23 +134,23 @@ func TestParseDrawPayload_valid(t *testing.T) {
 }
 
 func TestParseDrawPayload_missingPolylines(t *testing.T) {
-	_, _, _, err := parseDrawPayload(map[string]interface{}{})
+	_, _, _, err := parseDrawPayload(map[string]any{})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
 }
 
 func TestParseDrawPayload_emptyPolylines(t *testing.T) {
-	payload := map[string]interface{}{"polylines": []interface{}{}}
+	payload := map[string]any{"polylines": []any{}}
 	_, _, _, err := parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "polylines")
 }
 
 func TestParseDrawPayload_emptyInnerPolyline(t *testing.T) {
-	payload := map[string]interface{}{
-		"polylines": []interface{}{
-			[]interface{}{[]interface{}{0.0, 0.0}},
-			[]interface{}{},
+	payload := map[string]any{
+		"polylines": []any{
+			[]any{[]any{0.0, 0.0}},
+			[]any{},
 		},
 	}
 	_, _, _, err := parseDrawPayload(payload)
@@ -159,9 +159,9 @@ func TestParseDrawPayload_emptyInnerPolyline(t *testing.T) {
 }
 
 func TestParseDrawPayload_wrongPointArity(t *testing.T) {
-	payload := map[string]interface{}{
-		"polylines": []interface{}{
-			[]interface{}{[]interface{}{0.0, 0.0, 5.0}},
+	payload := map[string]any{
+		"polylines": []any{
+			[]any{[]any{0.0, 0.0, 5.0}},
 		},
 	}
 	_, _, _, err := parseDrawPayload(payload)
@@ -170,9 +170,9 @@ func TestParseDrawPayload_wrongPointArity(t *testing.T) {
 }
 
 func TestParseDrawPayload_nonNumeric(t *testing.T) {
-	payload := map[string]interface{}{
-		"polylines": []interface{}{
-			[]interface{}{[]interface{}{"not a number", 0.0}},
+	payload := map[string]any{
+		"polylines": []any{
+			[]any{[]any{"not a number", 0.0}},
 		},
 	}
 	_, _, _, err := parseDrawPayload(payload)
@@ -180,7 +180,7 @@ func TestParseDrawPayload_nonNumeric(t *testing.T) {
 }
 
 func TestParseDrawImageArgs_valid(t *testing.T) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"image_b64": "abc",
 		"margin_mm": 20.0,
 		"rotate":    90,
@@ -195,13 +195,13 @@ func TestParseDrawImageArgs_valid(t *testing.T) {
 }
 
 func TestParseDrawImageArgs_missingImage(t *testing.T) {
-	_, err := parseDrawImageArgs(map[string]interface{}{"margin_mm": 20.0})
+	_, err := parseDrawImageArgs(map[string]any{"margin_mm": 20.0})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "image_b64")
 }
 
 func TestParseDrawImageArgs_negativeMargin(t *testing.T) {
-	_, err := parseDrawImageArgs(map[string]interface{}{
+	_, err := parseDrawImageArgs(map[string]any{
 		"image_b64": "abc",
 		"margin_mm": -1.0,
 	})
@@ -210,7 +210,7 @@ func TestParseDrawImageArgs_negativeMargin(t *testing.T) {
 }
 
 func TestParseDrawImageArgs_badRotate(t *testing.T) {
-	_, err := parseDrawImageArgs(map[string]interface{}{
+	_, err := parseDrawImageArgs(map[string]any{
 		"image_b64": "abc",
 		"rotate":    45,
 	})
@@ -223,7 +223,7 @@ func TestDrawImage_missingGenerator(t *testing.T) {
 		logger: logging.NewTestLogger(t),
 		cfg:    &Config{},
 	}
-	_, err := d.drawImage(context.Background(), map[string]interface{}{"image_b64": "abc"})
+	_, err := d.drawImage(context.Background(), map[string]any{"image_b64": "abc"})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "stroke_generator")
 }
@@ -341,34 +341,34 @@ func TestConfigValidate_photoAndPreviewCameraInDeps(t *testing.T) {
 }
 
 func TestParseCaptureAndDrawArgs_defaultsPreviewScale(t *testing.T) {
-	got, err := parseCaptureAndDrawArgs(map[string]interface{}{"preview": true})
+	got, err := parseCaptureAndDrawArgs(map[string]any{"preview": true})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, got.Preview, test.ShouldBeTrue)
 	test.That(t, got.PreviewPxPerMM, test.ShouldEqual, defaultPreviewPxPerMM)
 }
 
 func TestParseCaptureAndDrawArgs_emptyPayloadIsValid(t *testing.T) {
-	got, err := parseCaptureAndDrawArgs(map[string]interface{}{})
+	got, err := parseCaptureAndDrawArgs(map[string]any{})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, got.Preview, test.ShouldBeFalse)
 	test.That(t, got.Rotate, test.ShouldEqual, 0)
 }
 
 func TestParseCaptureAndDrawArgs_badRotate(t *testing.T) {
-	_, err := parseCaptureAndDrawArgs(map[string]interface{}{"rotate": 45})
+	_, err := parseCaptureAndDrawArgs(map[string]any{"rotate": 45})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "rotate")
 }
 
 func TestParseCaptureAndDrawArgs_negativePreviewScale(t *testing.T) {
-	_, err := parseCaptureAndDrawArgs(map[string]interface{}{"preview_px_per_mm": -2.0})
+	_, err := parseCaptureAndDrawArgs(map[string]any{"preview_px_per_mm": -2.0})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "preview_px_per_mm")
 }
 
 func TestCaptureAndDraw_missingPhoto(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
-	_, err := d.captureAndDraw(context.Background(), map[string]interface{}{})
+	_, err := d.captureAndDraw(context.Background(), map[string]any{})
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "photo")
 }
@@ -541,19 +541,19 @@ func TestConstraints_nilWhenNothingApplies(t *testing.T) {
 }
 
 func TestParseCaptureAndDrawArgs_recaptureDefaultsTrue(t *testing.T) {
-	got, err := parseCaptureAndDrawArgs(map[string]interface{}{})
+	got, err := parseCaptureAndDrawArgs(map[string]any{})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, got.recapture(), test.ShouldBeTrue)
 }
 
 func TestParseCaptureAndDrawArgs_recaptureFalse(t *testing.T) {
-	got, err := parseCaptureAndDrawArgs(map[string]interface{}{"recapture": false})
+	got, err := parseCaptureAndDrawArgs(map[string]any{"recapture": false})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, got.recapture(), test.ShouldBeFalse)
 }
 
 func TestParseCaptureAndDrawArgs_recaptureKeepsStrokeArgs(t *testing.T) {
-	got, err := parseCaptureAndDrawArgs(map[string]interface{}{
+	got, err := parseCaptureAndDrawArgs(map[string]any{
 		"recapture": false,
 		"preview":   true,
 		"margin_mm": 25.0,
@@ -566,9 +566,9 @@ func TestParseCaptureAndDrawArgs_recaptureKeepsStrokeArgs(t *testing.T) {
 }
 
 func TestDrawOrPreview_pushesToPreviewCameraOnPreview(t *testing.T) {
-	var got map[string]interface{}
+	var got map[string]any
 	cam := inject.NewCamera("line-preview")
-	cam.DoFunc = func(_ context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	cam.DoFunc = func(_ context.Context, cmd map[string]any) (map[string]any, error) {
 		got = cmd
 		return nil, nil
 	}
@@ -590,7 +590,7 @@ func TestDrawOrPreview_previewFailureIsFatalOnlyForPreview(t *testing.T) {
 	// Mid-draw the picture is a convenience; refusing to draw over it would be
 	// the wrong trade. Asking for a preview and getting none is a real failure.
 	cam := inject.NewCamera("line-preview")
-	cam.DoFunc = func(_ context.Context, _ map[string]interface{}) (map[string]interface{}, error) {
+	cam.DoFunc = func(_ context.Context, _ map[string]any) (map[string]any, error) {
 		return nil, errors.New("buffer unavailable")
 	}
 	d := &drawer{
@@ -672,7 +672,7 @@ func TestStatus_elapsedStopsAtTheEnd(t *testing.T) {
 
 func TestDoCommand_statusVerb(t *testing.T) {
 	d := &drawer{logger: logging.NewTestLogger(t), cfg: &Config{}}
-	resp, err := d.DoCommand(context.Background(), map[string]interface{}{"status": map[string]interface{}{}})
+	resp, err := d.DoCommand(context.Background(), map[string]any{"status": map[string]any{}})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, resp["state"], test.ShouldEqual, phaseIdle)
 }
@@ -706,11 +706,11 @@ func TestConfigValidate_topRightCornerAccepted(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 }
 
-func twoPolylinePayload(startAt int) map[string]interface{} {
-	return map[string]interface{}{
-		"polylines": []interface{}{
-			[]interface{}{[]interface{}{0.0, 0.0}, []interface{}{10.0, 5.0}},
-			[]interface{}{[]interface{}{20.0, 20.0}},
+func twoPolylinePayload(startAt int) map[string]any {
+	return map[string]any{
+		"polylines": []any{
+			[]any{[]any{0.0, 0.0}, []any{10.0, 5.0}},
+			[]any{[]any{20.0, 20.0}},
 		},
 		"start_at": startAt,
 	}
@@ -753,7 +753,7 @@ func TestPause_waitsForTheDrawToStop(t *testing.T) {
 	_, release, err := d.acquireDrawSlot(context.Background())
 	test.That(t, err, test.ShouldBeNil)
 
-	returned := make(chan map[string]interface{})
+	returned := make(chan map[string]any)
 	go func() {
 		resp, _ := d.pause(context.Background())
 		returned <- resp
@@ -799,12 +799,12 @@ func TestResume_refusedWhileAnotherDrawRuns(t *testing.T) {
 
 func TestParseDrawPayload_paperOverride(t *testing.T) {
 	payload := twoPolylinePayload(0)
-	payload["paper"] = map[string]interface{}{
-		"top_left_corner": map[string]interface{}{
-			"translation": map[string]interface{}{"x": 100.0, "y": 50.0, "z": 20.0},
-			"orientation": map[string]interface{}{"type": "ov_degrees", "value": map[string]interface{}{"x": 0.0, "y": 0.0, "z": -1.0, "th": 0.0}},
+	payload["paper"] = map[string]any{
+		"top_left_corner": map[string]any{
+			"translation": map[string]any{"x": 100.0, "y": 50.0, "z": 20.0},
+			"orientation": map[string]any{"type": "ov_degrees", "value": map[string]any{"x": 0.0, "y": 0.0, "z": -1.0, "th": 0.0}},
 		},
-		"top_right_corner": map[string]interface{}{"x": 100.0, "y": 135.9, "z": 20.0},
+		"top_right_corner": map[string]any{"x": 100.0, "y": 135.9, "z": 20.0},
 		"width_mm":         85.9,
 		"height_mm":        59.2,
 	}
@@ -818,7 +818,7 @@ func TestParseDrawPayload_paperOverride(t *testing.T) {
 	test.That(t, s.corner.Point().X, test.ShouldEqual, 100.0)
 	test.That(t, s.across.Y, test.ShouldAlmostEqual, 1.0)
 
-	payload["paper"] = map[string]interface{}{"width_mm": 1.0, "height_mm": 1.0}
+	payload["paper"] = map[string]any{"width_mm": 1.0, "height_mm": 1.0}
 	_, _, _, err = parseDrawPayload(payload)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "paper.top_left_corner")

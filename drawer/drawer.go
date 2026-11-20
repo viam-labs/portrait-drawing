@@ -402,7 +402,7 @@ func (d *drawer) advanceDrawing(done int) {
 
 // status is readable while a drawing is in flight: executeDraw holds the draw
 // slot but not the mutex, so this does not wait on it.
-func (d *drawer) status() map[string]interface{} {
+func (d *drawer) status() map[string]any {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	p := d.progress
@@ -410,7 +410,7 @@ func (d *drawer) status() map[string]interface{} {
 	if phase == "" {
 		phase = phaseIdle
 	}
-	out := map[string]interface{}{
+	out := map[string]any{
 		"state":   phase,
 		"drawing": d.cancelFn != nil,
 	}
@@ -553,7 +553,7 @@ func (d *drawer) configuredStroke() strokeLimits {
 	return strokeLimits{speed: d.cfg.StrokeSpeedDegsPerSec, acceleration: d.cfg.StrokeAccelerationDegsPerSecPerSec}
 }
 
-func parseStrokeLimits(payload interface{}) (strokeLimits, error) {
+func parseStrokeLimits(payload any) (strokeLimits, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return strokeLimits{}, fmt.Errorf("marshal payload: %w", err)
@@ -568,7 +568,7 @@ func parseStrokeLimits(payload interface{}) (strokeLimits, error) {
 	return strokeLimits{speed: args.StrokeSpeedDegsPerSec, acceleration: args.StrokeAccelerationDegsPerSecPerSec}, nil
 }
 
-func parseDrawPayload(payload interface{}) ([]Polyline, int, *Paper, error) {
+func parseDrawPayload(payload any) ([]Polyline, int, *Paper, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("marshal payload: %w", err)
@@ -604,7 +604,7 @@ func parseDrawPayload(payload interface{}) ([]Polyline, int, *Paper, error) {
 	return out, args.StartAt, args.Paper, nil
 }
 
-func (d *drawer) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+func (d *drawer) DoCommand(ctx context.Context, cmd map[string]any) (map[string]any, error) {
 	v, err := verb.Single(cmd)
 	if err != nil {
 		return nil, err
@@ -655,7 +655,7 @@ func (d *drawer) goToRestPose(ctx context.Context, fs *referenceframe.FrameSyste
 	return d.planAndExecute(ctx, fs, d.homePose, d.constraints(false))
 }
 
-func (d *drawer) goHome(parent context.Context) (map[string]interface{}, error) {
+func (d *drawer) goHome(parent context.Context) (map[string]any, error) {
 	if !d.hasRestPose() {
 		return nil, fmt.Errorf("drawer: %w", errNoHomePose)
 	}
@@ -668,7 +668,7 @@ func (d *drawer) goHome(parent context.Context) (map[string]interface{}, error) 
 	if err := d.goToRestPose(ctx, nil); err != nil {
 		return nil, fmt.Errorf("drawer: go_home: %w", err)
 	}
-	return map[string]interface{}{"status": "ok"}, nil
+	return map[string]any{"status": "ok"}, nil
 }
 
 // Only one draw/draw_image in flight at a time. Cancel aborts it and Stops the arm.
@@ -698,12 +698,12 @@ func (d *drawer) acquireDrawSlot(parent context.Context) (context.Context, func(
 // pause asks the running draw to stop after the polyline it is on, with the pen
 // up and the arm back at its rest pose, and waits for that so the arm is free
 // for another job when it returns.
-func (d *drawer) pause(ctx context.Context) (map[string]interface{}, error) {
+func (d *drawer) pause(ctx context.Context) (map[string]any, error) {
 	d.mu.Lock()
 	done := d.drawDone
 	if done == nil {
 		d.mu.Unlock()
-		return map[string]interface{}{"paused": false, "reason": "nothing running"}, nil
+		return map[string]any{"paused": false, "reason": "nothing running"}, nil
 	}
 	d.pauseRequested = true
 	d.mu.Unlock()
@@ -724,7 +724,7 @@ func (d *drawer) statusPhase() string {
 }
 
 // resume carries on the job a pause, cancel or failure interrupted.
-func (d *drawer) resume(parent context.Context) (map[string]interface{}, error) {
+func (d *drawer) resume(parent context.Context) (map[string]any, error) {
 	d.mu.Lock()
 	held, next, paper := d.held, d.nextPolyline, d.heldPaper
 	d.mu.Unlock()
@@ -751,19 +751,19 @@ func (d *drawer) hold(polylines []Polyline, next int, paper surface) {
 	d.mu.Unlock()
 }
 
-func (d *drawer) cancel(ctx context.Context) (map[string]interface{}, error) {
+func (d *drawer) cancel(ctx context.Context) (map[string]any, error) {
 	d.mu.Lock()
 	cancelFn := d.cancelFn
 	d.mu.Unlock()
 	if cancelFn == nil {
-		return map[string]interface{}{"canceled": false, "reason": "nothing running"}, nil
+		return map[string]any{"canceled": false, "reason": "nothing running"}, nil
 	}
 	cancelFn()
 	d.setPhase(phaseCanceled)
 	if err := d.arm.Stop(ctx, nil); err != nil {
 		d.logger.Warnf("drawer: arm.Stop during cancel: %v", err)
 	}
-	return map[string]interface{}{"canceled": true}, nil
+	return map[string]any{"canceled": true}, nil
 }
 
 // strokeArgs are the stroke-generation options shared by the verbs that turn a
@@ -807,7 +807,7 @@ type drawImageArgs struct {
 	strokeArgs
 }
 
-func parseDrawImageArgs(payload interface{}) (*drawImageArgs, error) {
+func parseDrawImageArgs(payload any) (*drawImageArgs, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
@@ -840,7 +840,7 @@ func (a *captureAndDrawArgs) recapture() bool {
 	return a.Recapture == nil || *a.Recapture
 }
 
-func parseCaptureAndDrawArgs(payload interface{}) (*captureAndDrawArgs, error) {
+func parseCaptureAndDrawArgs(payload any) (*captureAndDrawArgs, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshal payload: %w", err)
@@ -855,7 +855,7 @@ func parseCaptureAndDrawArgs(payload interface{}) (*captureAndDrawArgs, error) {
 	return &a, nil
 }
 
-func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[string]interface{}, error) {
+func (d *drawer) drawImage(parent context.Context, payload any) (map[string]any, error) {
 	if d.strokeGenerator == nil {
 		return nil, errors.New("drawer: draw_image requires stroke_generator to be configured")
 	}
@@ -880,7 +880,7 @@ func (d *drawer) drawImage(parent context.Context, payload interface{}) (map[str
 
 // captureAndDraw is the whole in-app loop: pose the arm so the camera frames
 // the subject, trigger the shot, and draw what comes back.
-func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
+func (d *drawer) captureAndDraw(parent context.Context, payload any) (map[string]any, error) {
 	if d.photo == nil {
 		return nil, errors.New("drawer: capture_and_draw requires photo to be configured")
 	}
@@ -932,7 +932,7 @@ func (d *drawer) captureAndDraw(parent context.Context, payload interface{}) (ma
 // triggerPhoto asks the photo camera for a new frame. The countdown and image
 // encoding are its business, not the drawer's.
 func (d *drawer) triggerPhoto(ctx context.Context) error {
-	if _, err := d.photo.DoCommand(ctx, map[string]interface{}{"capture": map[string]interface{}{}}); err != nil {
+	if _, err := d.photo.DoCommand(ctx, map[string]any{"capture": map[string]any{}}); err != nil {
 		return fmt.Errorf("drawer: trigger photo %q: %w", d.cfg.Photo, err)
 	}
 	return nil
@@ -972,7 +972,7 @@ func (d *drawer) readPhoto(ctx context.Context) (imageB64, depthB64 string, err 
 func (d *drawer) generateStrokes(
 	ctx context.Context, imageB64, depthB64 string, a *strokeArgs,
 ) ([]Polyline, error) {
-	inner := map[string]interface{}{
+	inner := map[string]any{
 		"image_b64":       imageB64,
 		"paper_width_mm":  d.cfg.PaperWidthMM,
 		"paper_height_mm": d.cfg.PaperHeightMM,
@@ -986,7 +986,7 @@ func (d *drawer) generateStrokes(
 	if a.AutoRotate != nil {
 		inner["auto_rotate"] = *a.AutoRotate
 	}
-	resp, err := d.strokeGenerator.DoCommand(ctx, map[string]interface{}{"generate": inner})
+	resp, err := d.strokeGenerator.DoCommand(ctx, map[string]any{"generate": inner})
 	if err != nil {
 		return nil, fmt.Errorf("drawer: stroke_generator call: %w", err)
 	}
@@ -997,7 +997,7 @@ func (d *drawer) generateStrokes(
 	return polylines, nil
 }
 
-func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *strokeArgs) (map[string]interface{}, error) {
+func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *strokeArgs) (map[string]any, error) {
 	total := 0
 	for _, poly := range polylines {
 		total += len(poly)
@@ -1013,8 +1013,8 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 	// was last previewed — stale, and indistinguishable from current.
 	pushed := false
 	if d.previewCamera != nil {
-		_, pushErr := d.previewCamera.DoCommand(ctx, map[string]interface{}{
-			"set_image": map[string]interface{}{"image_b64": encoded, "source_name": "line-preview"},
+		_, pushErr := d.previewCamera.DoCommand(ctx, map[string]any{
+			"set_image": map[string]any{"image_b64": encoded, "source_name": "line-preview"},
 		})
 		switch {
 		case pushErr == nil:
@@ -1031,7 +1031,7 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 	if !a.Preview {
 		return d.executeDraw(ctx, polylines, 0, d.paper)
 	}
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"preview":        true,
 		"polyline_count": len(polylines),
 		"total_points":   total,
@@ -1044,7 +1044,7 @@ func (d *drawer) drawOrPreview(ctx context.Context, polylines []Polyline, a *str
 	return resp, nil
 }
 
-func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]interface{}, error) {
+func (d *drawer) draw(parent context.Context, payload any) (map[string]any, error) {
 	polylines, startAt, override, err := parseDrawPayload(payload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
@@ -1227,7 +1227,7 @@ func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zU
 	return out
 }
 
-func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt int, paper surface) (map[string]interface{}, error) {
+func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt int, paper surface) (map[string]any, error) {
 	fs, err := d.buildFrameSystem(ctx)
 	if err != nil {
 		return nil, err
@@ -1374,7 +1374,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 				}
 			}
 			d.setPhase(phasePaused)
-			return map[string]interface{}{
+			return map[string]any{
 				"paused":          true,
 				"next_polyline":   drawn,
 				"polylines_total": len(polylines),
@@ -1400,7 +1400,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	}
 	d.setPhase(phaseDone)
 
-	return map[string]interface{}{
+	return map[string]any{
 		"total_points": total,
 	}, nil
 }
@@ -1517,6 +1517,6 @@ func applyJointLimits(logger logging.Logger, fs *referenceframe.FrameSystem, inp
 	return nil
 }
 
-func (d *drawer) Status(_ context.Context) (map[string]interface{}, error) {
+func (d *drawer) Status(_ context.Context) (map[string]any, error) {
 	return d.status(), nil
 }

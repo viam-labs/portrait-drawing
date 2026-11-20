@@ -9,13 +9,13 @@ import (
 func TestSingle(t *testing.T) {
 	tests := []struct {
 		name    string
-		cmd     map[string]interface{}
+		cmd     map[string]any
 		want    string
 		wantErr string
 	}{
-		{name: "single verb", cmd: map[string]interface{}{"detect": nil}, want: "detect", wantErr: ""},
-		{name: "empty", cmd: map[string]interface{}{}, want: "", wantErr: "expected exactly one verb in DoCommand, got 0"},
-		{name: "multiple verbs", cmd: map[string]interface{}{"detect": nil, "hint": true}, want: "", wantErr: "expected exactly one verb in DoCommand, got 2"},
+		{name: "single verb", cmd: map[string]any{"detect": nil}, want: "detect", wantErr: ""},
+		{name: "empty", cmd: map[string]any{}, want: "", wantErr: "expected exactly one verb in DoCommand, got 0"},
+		{name: "multiple verbs", cmd: map[string]any{"detect": nil, "hint": true}, want: "", wantErr: "expected exactly one verb in DoCommand, got 2"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
