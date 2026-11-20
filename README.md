@@ -58,6 +58,7 @@ DoCommand, no image data passing through your hands.
 | `input_range_override` | object | no | Per-joint limits tighter than the arm model declares, to keep planned motions inside a safe envelope. Limits can only be tightened, never loosened. |
 | `line_tolerance_mm` | number | no | How far a pen-on-paper move may stray from its straight line, up and down included. Default 0.5; a rigid pen needs about 0.05. |
 | `stroke_speed_degs_per_sec`, `stroke_acceleration_degs_per_sec_per_sec` | number | no | Cap the arm while the pen is on the paper or going onto it; travel between strokes runs at the arm's own. A `draw` may carry its own. |
+| `detail_stroke_speed_degs_per_sec`, `detail_stroke_acceleration_degs_per_sec_per_sec` | number | no | Caps for the strokes a `draw` marks as detail with `detail_from`: a portrait's eyes, brows and lips, a few mm across, which the arm rounds off at a long stroke's speed. Their points are also spaced 0.5 mm apart instead of 1. Default a third of the stroke caps, or 10 and 50. |
 | `touch_off` | object | no | Find the paper by touching it before each drawing. See [Finding the paper by touch](#finding-the-paper-by-touch). |
 | `pen_force` | object | no | Keep each stroke's force in a range by adjusting the pen's depth as it draws. See [`pen_force`](#pen_force). |
 
@@ -378,6 +379,10 @@ no longer holds the job itself:
 {"draw": {"polylines": [...], "start_at": 37}}
 ```
 
+`detail_from` draws the polylines from that index on at the detail caps. The
+stroke generator's `sketch` style puts a face's landmark-drawn features last and
+reports where they start; the reception queue passes it on.
+
 `paper` draws on another surface instead of the configured one, for a service
 with its own workspace under this arm. It takes the same fields as the config,
 without the `paper_` prefix:
@@ -489,6 +494,7 @@ Every attribute is optional; the defaults are tuned for portraits.
 | `min_face_fraction` | number | `sketch` only. Rejects a photo whose largest face is narrower than this share of the photo's shorter side, so an empty frame returns an error instead of drawing a face from the background. Default `0.12`. |
 | `max_strokes` | int | Both styles. Caps the number of strokes, since each one costs the arm about a second of pen lift and travel. The shortest go first; in `sketch` the landmark-drawn eyes, lips, brows and glasses are always kept. Default `110`; `0` removes the cap. `python/estimate_draw_time.py` estimates drawing time for a polyline set. |
 | `join_mm` | number | Both styles. Draws consecutive strokes as one where the next starts within this distance of where the last ended. Default `0.75`. |
+| `eye_scale` | number | `sketch` only. Draws each eye this much larger around its own centre: a pen's line is about 1 mm and a life-size eye on a card a few. Default `1.25`; `1` draws them life size. The face's landmark-drawn features (eyes, brows, lips, glasses) come last in the result, lightly simplified, with `detail_from` giving where they start. |
 | `size` | int | Long side, in pixels, the model sees. Larger recovers finer features — lashes, nostrils — at a roughly linear cost in strokes. Default `768`. |
 | `clahe` | number | Local contrast lift before the model runs. Default `2.0`; `0` disables. |
 | `sigma` | number | Smoothing of the model response before ridges are traced. Default `2.2`. |

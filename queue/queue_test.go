@@ -158,8 +158,9 @@ func (w *fakeWriter) DoCommand(ctx context.Context, cmd map[string]any) (map[str
 }
 
 type fakeGenerator struct {
-	lastImage string
-	fail      error
+	lastImage  string
+	fail       error
+	detailFrom any
 }
 
 func (g *fakeGenerator) DoCommand(_ context.Context, cmd map[string]any) (map[string]any, error) {
@@ -171,7 +172,11 @@ func (g *fakeGenerator) DoCommand(_ context.Context, cmd map[string]any) (map[st
 	for i := range 6 {
 		polylines = append(polylines, []any{[]any{float64(i), 0.0}, []any{float64(i), 5.0}})
 	}
-	return map[string]any{"polylines": polylines}, nil
+	resp := map[string]any{"polylines": polylines}
+	if g.detailFrom != nil {
+		resp["detail_from"] = g.detailFrom
+	}
+	return resp, nil
 }
 
 type harness struct {
@@ -1209,4 +1214,26 @@ func TestFeedCardRunsOneFeedWhenIdle(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, resp["fed"], test.ShouldBeTrue)
 	test.That(t, f.count(), test.ShouldEqual, 1)
+}
+
+func TestThePortraitsFeaturesAreMarkedForTheDrawer(t *testing.T) {
+	h := newHarness(t)
+	h.gen.detailFrom = 4.0
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.drawUntil(t, id, stateDone)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, h.drawer.draws[0]["detail_from"], test.ShouldEqual, 4)
+}
+
+func TestNoFeaturesNothingMarked(t *testing.T) {
+	h := newHarness(t)
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]any{"image_b64": "x"})
+	h.drawUntil(t, id, stateDone)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	_, marked := h.drawer.draws[0]["detail_from"]
+	test.That(t, marked, test.ShouldBeFalse)
 }

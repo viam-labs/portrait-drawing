@@ -538,7 +538,22 @@ def draw_headwear(hat, fw):
     return out
 
 
-def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0.25, min_clothes=0.4, min_hair=0.1, seed=5, max_strokes=0):
+class Strokes(list):
+    """Pixel-space strokes whose last n_detail are the landmark-drawn features."""
+
+    def __init__(self, strokes, n_detail=0):
+        super().__init__(strokes)
+        self.n_detail = n_detail
+
+
+# A pen's line is about 1 mm wide and an eye on a card a few mm; drawn this much
+# larger than life, around its own centre, it still reads as an eye.
+DEFAULT_EYE_SCALE = 1.25
+
+
+def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0.25, min_clothes=0.4, min_hair=0.1, seed=5, max_strokes=0,
+              eye_scale=1.0, split=False):
+    """Traced lines then the landmark-drawn features; with split, the two apart."""
     L = landmarks(img)
     cat, face, hair, head = segments(img)
     fw = np.linalg.norm(L[234] - L[454])
@@ -594,7 +609,8 @@ def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0
     s = []
     for up, lo, ci, ring, a, b, um, lm in ((L_UP, L_LO, 468, [469, 470, 471, 472], 33, 133, 159, 145),
                                           (R_UP, R_LO, 473, [474, 475, 476, 477], 263, 362, 386, 374)):
-        s += eye_v7(L, up, lo, ci, ring, a, b, um, lm, fw, "ring")
+        centre = 0.5 * (L[a] + L[b])
+        s += [centre + eye_scale * (p - centre) for p in eye_v7(L, up, lo, ci, ring, a, b, um, lm, fw, "ring")]
     s += lips(L) + brow_outline(L, L_BROW_U, L_BROW_L) + brow_outline(L, R_BROW_U, R_BROW_L)
     rng = np.random.default_rng(seed)
     _, found = facial_hair(img, cat, L, fw)
@@ -612,7 +628,7 @@ def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0
     # landmark features are what people recognise first, so a stroke budget comes out of the extracted lines
     if max_strokes:
         kept = longest(kept, max(0, max_strokes - len(s)))
-    return kept + s
+    return (kept, s) if split else kept + s
 
 
 def longest(strokes, n):
@@ -627,7 +643,7 @@ def face_fraction(face_width_px, img_shape):
     return face_width_px / min(img_shape[:2])
 
 
-def sketch_polylines(img, min_face_fraction=0.12, max_strokes=0):
+def sketch_polylines(img, min_face_fraction=0.12, max_strokes=0, eye_scale=DEFAULT_EYE_SCALE):
     """Photo (BGR) in; pixel-space polylines and the size of the face crop they live in out."""
     if not itp._YUNET_PATH.exists():
         raise RuntimeError(f"sketch style: face model missing at {itp._YUNET_PATH}; first_run.sh downloads it")
@@ -642,16 +658,35 @@ def sketch_polylines(img, min_face_fraction=0.12, max_strokes=0):
     box = itp.face_crop_box(img, 0.7, 1.3, 1.1)
     if box:
         img = img[box[1]:box[3], box[0]:box[2]]
-    polylines = style_v13(img, anime(img), max_strokes=max_strokes)
-    return polylines, img.shape[:2]
+    traced, features = style_v13(img, anime(img), max_strokes=max_strokes, eye_scale=eye_scale, split=True)
+    return Strokes(traced + features, n_detail=len(features)), img.shape[:2]
+
+
+def _simplified(polylines_mm, epsilon_mm, min_length_mm):
+    out = []
+    for p in polylines_mm:
+        a = cv2.approxPolyDP(np.asarray(p, np.float32).reshape(-1, 1, 2), epsilon_mm, False)[:, 0, :].astype(float)
+        if len(a) >= 2 and length(a) >= min_length_mm:
+            out.append(a)
+    return out
 
 
 def simplify_and_order(polylines_mm, epsilon_mm=0.25, min_length_mm=1.0, max_strokes=0, join_mm=0.0):
     """Drop points the pen cannot resolve, drop strokes too short to see, then order,
     join and cap the rest (see image_to_polylines.finish_strokes)."""
-    strokes = []
-    for p in polylines_mm:
-        a = cv2.approxPolyDP(np.asarray(p, np.float32).reshape(-1, 1, 2), epsilon_mm, False)[:, 0, :].astype(float)
-        if len(a) >= 2 and length(a) >= min_length_mm:
-            strokes.append(a)
-    return itp.finish_strokes(strokes, max_strokes, join_mm)
+    return itp.finish_strokes(_simplified(polylines_mm, epsilon_mm, min_length_mm), max_strokes, join_mm)
+
+
+def simplify_and_order_with_detail(polylines_mm, n_detail, max_strokes=0, join_mm=0.0, detail_epsilon_mm=0.1):
+    """As simplify_and_order, but the last n_detail strokes (eyes, brows, lips: the
+    landmark-drawn features) are kept apart and drawn last, simplified more lightly
+    since they are only a few mm across. Returns the strokes and the index the
+    features start at, so the drawer can draw them slower."""
+    n_detail = min(n_detail, len(polylines_mm))
+    traced, features = polylines_mm[:len(polylines_mm) - n_detail], polylines_mm[len(polylines_mm) - n_detail:]
+    detail = _simplified(features, detail_epsilon_mm, 0.5)
+    budget = max(0, max_strokes - len(detail)) if max_strokes else 0
+    out = itp.finish_strokes(_simplified(traced, 0.25, 1.0), budget, join_mm)
+    detail_from = len(out)
+    out += itp.finish_strokes(detail, 0, 0.0)
+    return out, detail_from

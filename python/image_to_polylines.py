@@ -538,8 +538,13 @@ def image_bytes_to_polylines(
     min_face_fraction: float = 0.12,
     max_strokes: int = 110,
     join_mm: float = 0.75,
+    eye_scale: float = None,
 ) -> list[list[list[float]]]:
-    """Decode image bytes and return paper-local mm polylines."""
+    """Decode image bytes and return paper-local mm polylines. For the sketch style the
+    result also carries detail_from: the index the facial features start at."""
+    if eye_scale is None:
+        import sketch_style
+        eye_scale = sketch_style.DEFAULT_EYE_SCALE
     array = np.frombuffer(image_bytes, dtype=np.uint8)
     img = cv2.imdecode(array, cv2.IMREAD_COLOR)
     if img is None:
@@ -548,11 +553,13 @@ def image_bytes_to_polylines(
     if style == "sketch":
         # Imported here so the default style never pays for MediaPipe at startup.
         import sketch_style
-        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img, min_face_fraction, max_strokes)
+        polylines, (crop_h, crop_w) = sketch_style.sketch_polylines(img, min_face_fraction, max_strokes, eye_scale)
         if auto_rotate:
             rotate = _rotation_for_paper(crop_w, crop_h, paper_width_mm, paper_height_mm)
         mm = polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
-        return sketch_style.simplify_and_order(mm, max_strokes=max_strokes, join_mm=join_mm)
+        n_detail = getattr(polylines, "n_detail", 0)
+        out, detail_from = sketch_style.simplify_and_order_with_detail(mm, n_detail, max_strokes=max_strokes, join_mm=join_mm)
+        return Drawing(out, detail_from)
     if style != "lines":
         raise ValueError(f"style must be 'lines' or 'sketch' (got {style!r})")
 
@@ -581,6 +588,14 @@ def image_bytes_to_polylines(
     )
     mm = polylines_to_mm(polylines, paper_width_mm, paper_height_mm, margin_mm, rotate, mirror)
     return finish_strokes(mm, max_strokes, join_mm)
+
+
+class Drawing(list):
+    """Polylines, and where the strokes to draw slowly start: len(self) if none."""
+
+    def __init__(self, polylines, detail_from=None):
+        super().__init__(polylines)
+        self.detail_from = len(polylines) if detail_from is None else detail_from
 
 
 def main() -> int:
@@ -618,6 +633,8 @@ def main() -> int:
                    help="keep at most this many strokes, dropping the shortest; 0 for no cap")
     p.add_argument("--join-mm", type=float, default=0.75,
                    help="draw consecutive strokes as one where they are this close")
+    p.add_argument("--eye-scale", type=float, default=None,
+                   help="sketch style: draw each eye this much larger around its centre (default 1.25)")
     args = p.parse_args()
 
     image_bytes = sys.stdin.buffer.read()
@@ -655,12 +672,16 @@ def main() -> int:
             min_face_fraction=args.min_face_fraction,
             max_strokes=args.max_strokes,
             join_mm=args.join_mm,
+            eye_scale=args.eye_scale,
         )
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    json.dump({"polylines": polylines}, sys.stdout)
+    out = {"polylines": polylines}
+    if getattr(polylines, "detail_from", len(polylines)) < len(polylines):
+        out["detail_from"] = polylines.detail_from
+    json.dump(out, sys.stdout)
     return 0
 
 
