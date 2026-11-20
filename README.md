@@ -795,6 +795,7 @@ calibration too, which then takes the offset into account.
 | `camera` | string | **yes** | The camera that photographs the mat. |
 | `source_name` | string | no | Which of the camera's images to use when it returns several, such as a RealSense's `color`. |
 | `survey_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to before every photo, so the camera sees the mat from where it was calibrated. |
+| `view_camera` | string | no | A `viam:frame-buffer:camera` that each `look` and `find` shows its photo on, with the mat outlined in blue, fresh sheets green, used ones red, near-misses yellow and labelled why, and a dot on each sheet's first corner. Open it in the CONTROL tab. |
 | `drawer` | string | for `calibrate` | The drawer that draws the calibration crosses. |
 | `tool_orientation` | orientation | **yes** | The pen-down orientation every returned paper carries. |
 | `pen_down_z` | number | **yes** | The arm's Z with the pen tip on the mat. |
@@ -804,6 +805,19 @@ calibration too, which then takes the offset into account.
 | `card_width_mm`, `card_height_mm` | number | no | Default 101.6 x 152.4 (4 x 6 in). |
 | `name_tag_width_mm`, `name_tag_height_mm` | number | no | The label's writing area, inside its white backing. Default 82 x 53. |
 | `max_size_error_mm` | number | no | How far a sheet's measured size may be from its kind's before it is rejected as something else. Default 10. |
+
+### `look`
+
+Photographs the mat and reports the sheets it sees, in pixels, without needing
+a calibration: the way to check detection on a new mat or under new light.
+
+```json
+{"look": {}}
+```
+
+With `view_camera` set the picture goes there; without it, the response carries
+it as `annotated_png_b64`. `rejected` lists bright shapes that were not taken
+for sheets, and why.
 
 ### `find`
 

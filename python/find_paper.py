@@ -18,6 +18,7 @@ camera's colour cast.
 """
 
 import argparse
+import base64
 import itertools
 import json
 import math
@@ -235,13 +236,20 @@ def find_sheets(img, template):
     # Every boundary pixel is kept: the corner fit needs points along each side.
     contours, _ = cv2.findContours(solid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
-    sheets = []
+    sheets, rejected = [], []
+
+    def reject(c, reason):
+        if cv2.contourArea(c) >= MIN_SHEET_PX / 4:
+            rejected.append({"reason": reason, "outline_px": cv2.approxPolyDP(c, 2, True).reshape(-1, 2).tolist()})
+
     for c in contours:
         area = cv2.contourArea(c)
         if area < MIN_SHEET_PX:
+            reject(c, "too small")
             continue
         (_, _), (rw, rh), _ = cv2.minAreaRect(c)
         if area / (rw * rh) < MIN_RECT_FILL:
+            reject(c, "not rectangular")
             continue
         filled = np.zeros(solid.shape, np.uint8)
         cv2.drawContours(filled, [c], -1, 255, -1)
@@ -282,7 +290,42 @@ def find_sheets(img, template):
             sheet["used"] = len(strokes) >= USED_CARD_STROKES
         sheet["corners_px"] = [[round(float(x), 2), round(float(y), 2)] for x, y in corners]
         sheets.append(sheet)
-    return {"sheets": sheets, "mat_px": hull.reshape(-1, 2).tolist()}
+    return {"sheets": sheets, "rejected": rejected, "mat_px": hull.reshape(-1, 2).tolist()}
+
+
+def annotate(img, found):
+    """The photo with what was found drawn on it: the mat in blue, fresh sheets
+    green, used ones red, near-misses yellow, and a dot on each sheet's first
+    corner (the top left the drawer writes from)."""
+    out = img.copy()
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+    if found.get("mat_px"):
+        cv2.polylines(out, [np.array(found["mat_px"], np.int32)], True, (255, 128, 0), 2)
+    for r in found.get("rejected", []):
+        pts = np.array(r["outline_px"], np.int32)
+        cv2.polylines(out, [pts], True, (0, 220, 255), 2)
+        x, y = pts.min(0)
+        cv2.putText(out, r["reason"], (int(x), int(y) - 6), font, scale, (0, 220, 255), thick)
+    for s in found.get("sheets", []):
+        pts = np.array(s["corners_px"], np.int32)
+        colour = (0, 0, 255) if s.get("used") else (0, 200, 0)
+        cv2.polylines(out, [pts], True, colour, 3)
+        cv2.circle(out, tuple(int(v) for v in pts[0]), 7, colour, -1)
+        if s["kind"] == "name_tag":
+            logo = s.get("logo")
+            detail = f"logo {logo['score']}" if logo else "no logo"
+            label = f"name tag, {'used' if s.get('used') else 'fresh'}, {detail}"
+        else:
+            label = f"card, {'used' if s.get('used') else 'fresh'}, {s.get('strokes', 0)} strokes"
+        cx, cy = pts.mean(0).astype(int)
+        (w, h), _ = cv2.getTextSize(label, font, scale, thick)
+        org = (int(cx - w / 2), int(cy + h / 2))
+        cv2.putText(out, label, org, font, scale, (0, 0, 0), thick + 3)
+        cv2.putText(out, label, org, font, scale, colour, thick)
+    ok, png = cv2.imencode(".png", out)
+    if not ok:
+        raise SystemExit("could not encode the annotated image")
+    return base64.b64encode(png.tobytes()).decode()
 
 
 def find_crosses(img, min_px=8, max_px=80):
@@ -366,6 +409,7 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sheets")
     s.add_argument("--logo", default=str(DEFAULT_LOGO))
+    s.add_argument("--annotate", action="store_true", help="add the photo with what was found drawn on it")
     c = sub.add_parser("crosses")
     c.add_argument("--min-px", type=int, default=8)
     c.add_argument("--max-px", type=int, default=80)
@@ -377,7 +421,10 @@ def main():
         template = cv2.imread(a.logo, cv2.IMREAD_GRAYSCALE)
         if template is None:
             raise SystemExit(f"could not read the logo template {a.logo}")
-        out = find_sheets(read_image(data), template)
+        img = read_image(data)
+        out = find_sheets(img, template)
+        if a.annotate:
+            out["annotated_png_b64"] = annotate(img, out)
     elif a.cmd == "crosses":
         out = {"crosses": find_crosses(read_image(data), a.min_px, a.max_px)}
     else:

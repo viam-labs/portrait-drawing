@@ -65,6 +65,9 @@ type Config struct {
 	// SurveyPose is an arm-position-saver switch the arm goes to before every
 	// photo, so the camera always sees the mat from where it was calibrated.
 	SurveyPose string `json:"survey_pose,omitempty"`
+	// ViewCamera is a viam:frame-buffer:camera each look and find shows its
+	// photo on, with what it found drawn over it.
+	ViewCamera string `json:"view_camera,omitempty"`
 	// Drawer draws the calibration crosses.
 	Drawer string `json:"drawer,omitempty"`
 	// ToolOrientation is the pen-down orientation every paper is drawn with.
@@ -124,6 +127,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if cfg.Drawer != "" {
 		deps = append(deps, cfg.Drawer)
+	}
+	if cfg.ViewCamera != "" {
+		deps = append(deps, cfg.ViewCamera)
 	}
 	return deps, nil, nil
 }
@@ -185,6 +191,7 @@ type paperFinder struct {
 	camera      imager
 	survey      mover
 	drawer      commander
+	view        commander
 	run         runner
 	orientation map[string]interface{}
 	calPath     string
@@ -231,7 +238,16 @@ func newPaperFinder(
 	if dataDir == "" {
 		dataDir = moduleRoot
 	}
-	return newWithClients(conf.ResourceName(), logger, cfg, cam, survey, drawer, run, dataDir)
+	f, err := newWithClients(conf.ResourceName(), logger, cfg, cam, survey, drawer, run, dataDir)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ViewCamera != "" {
+		if f.view, err = camera.FromProvider(deps, cfg.ViewCamera); err != nil {
+			return nil, fmt.Errorf("paper-finder: get view_camera %q: %w", cfg.ViewCamera, err)
+		}
+	}
+	return f, nil
 }
 
 func newWithClients(
@@ -281,12 +297,14 @@ func (f *paperFinder) DoCommand(ctx context.Context, cmd map[string]interface{})
 	switch v {
 	case "find":
 		return f.find(ctx, cmd["find"])
+	case "look":
+		return f.look(ctx)
 	case "calibrate":
 		return f.calibrate(ctx, cmd["calibrate"])
 	case "status":
 		return f.Status(ctx)
 	default:
-		return nil, fmt.Errorf("paper-finder: unknown verb %q; expected \"find\", \"calibrate\", or \"status\"", v)
+		return nil, fmt.Errorf("paper-finder: unknown verb %q; expected \"find\", \"look\", \"calibrate\", or \"status\"", v)
 	}
 }
 
@@ -359,11 +377,7 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 	if f.cal == nil {
 		return nil, errors.New("paper-finder: not calibrated; run calibrate first")
 	}
-	img, err := f.photo(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("paper-finder: %w", err)
-	}
-	stdout, err := f.run(ctx, img, "sheets")
+	stdout, err := f.detect(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("paper-finder: %w", err)
 	}
@@ -401,6 +415,52 @@ func (f *paperFinder) find(ctx context.Context, payload interface{}) (map[string
 		return sheets[i]["distance_mm"].(float64) < sheets[j]["distance_mm"].(float64)
 	})
 	return map[string]interface{}{"sheets": sheets, "rejected": rejected}, nil
+}
+
+// detect photographs the mat and finds the sheets on it, in pixels, showing
+// the result on view_camera when there is one.
+func (f *paperFinder) detect(ctx context.Context) ([]byte, error) {
+	img, err := f.photo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if f.view == nil {
+		return f.run(ctx, img, "sheets")
+	}
+	stdout, err := f.run(ctx, img, "sheets", "--annotate")
+	if err != nil {
+		return nil, err
+	}
+	var annotated struct {
+		PNG string `json:"annotated_png_b64"`
+	}
+	if err := json.Unmarshal(stdout, &annotated); err == nil && annotated.PNG != "" {
+		if _, err := f.view.DoCommand(ctx, map[string]interface{}{
+			"set_image": map[string]interface{}{"image_b64": annotated.PNG, "source_name": "paper-view"},
+		}); err != nil {
+			// The view is for people watching; losing it is no reason to stop finding paper.
+			f.logger.Warnf("paper-finder: could not show the view on %q: %v", f.cfg.ViewCamera, err)
+		}
+	}
+	return stdout, nil
+}
+
+// look shows what the finder sees, in pixels, without needing a calibration.
+func (f *paperFinder) look(ctx context.Context) (map[string]interface{}, error) {
+	stdout, err := f.detect(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("paper-finder: %w", err)
+	}
+	var found map[string]interface{}
+	if err := json.Unmarshal(stdout, &found); err != nil {
+		return nil, fmt.Errorf("paper-finder: parse python output: %w", err)
+	}
+	if f.view != nil {
+		delete(found, "annotated_png_b64")
+		found["view_camera"] = f.cfg.ViewCamera
+	}
+	delete(found, "mat_px")
+	return found, nil
 }
 
 // place turns a sheet's pixel corners into arm coordinates and a drawer paper

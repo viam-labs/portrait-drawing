@@ -309,3 +309,32 @@ func TestCalibrate_refusesAFitFromTooFewCrosses(t *testing.T) {
 	_, statErr := os.Stat(f.calPath)
 	test.That(t, os.IsNotExist(statErr), test.ShouldBeTrue)
 }
+
+func TestLook_worksUncalibratedAndShowsTheView(t *testing.T) {
+	out := `{"sheets": [{"kind": "card", "used": false}], "rejected": [], "mat_px": [[0, 0]], "annotated_png_b64": "cG5n"}`
+	f, _, sw, _, fp := newTestFinder(t, validConfig(), map[string]string{"sheets": out})
+	view := &fakeDrawer{}
+	f.view, f.cfg.ViewCamera = view, "paper-view"
+	resp, err := f.DoCommand(context.Background(), map[string]interface{}{"look": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, len(resp["sheets"].([]interface{})), test.ShouldEqual, 1)
+	test.That(t, resp["view_camera"], test.ShouldEqual, "paper-view")
+	_, hasPNG := resp["annotated_png_b64"]
+	test.That(t, hasPNG, test.ShouldBeFalse)
+	test.That(t, sw.positions, test.ShouldResemble, []uint32{surveyPosition})
+	test.That(t, string(fp.stdin["sheets"]), test.ShouldEqual, "photo")
+	test.That(t, len(view.cmds), test.ShouldEqual, 1)
+	set := view.cmds[0]["set_image"].(map[string]interface{})
+	test.That(t, set["image_b64"], test.ShouldEqual, "cG5n")
+}
+
+func TestFind_showsTheViewToo(t *testing.T) {
+	f, _, _, _, _ := newTestFinder(t, validConfig(), map[string]string{"sheets": sheetJSON(t, cardAt(100, 100, false))})
+	f.cal = &halfScale
+	view := &fakeDrawer{}
+	f.view = view
+	_, err := f.DoCommand(context.Background(), map[string]interface{}{"find": map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	// The fake output carries no image, so there is nothing to show.
+	test.That(t, len(view.cmds), test.ShouldEqual, 0)
+}
