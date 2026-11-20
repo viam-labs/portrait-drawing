@@ -720,6 +720,22 @@ command as `paper` in its payload, so `name_tag_writer` must accept one, as
 - **A retried card gets a fresh tag**, since the one it failed on may be part
   written. A retried portrait that had begun goes back to its own card.
 
+### Pausing
+
+`pause` is for when something is wrong at the desk: a capped pen, no paper, a
+pen to change. It stops the arm where it is, without finishing the stroke or
+the letter, and nothing starts until `resume`.
+
+- **A name tag or text card it interrupts goes back to the front** of the
+  queue, queued rather than failed. Its sheet may be part-written: with
+  `paper_finder` it gets a fresh one; without, swap the card before `resume`.
+- **A portrait it interrupts is `paused`** on its own sheet and, on `resume`,
+  carries on from the stroke it stopped on, redrawing that stroke from its start.
+- **New jobs still queue**; they just wait.
+- **`go_home` sends the arm to the drawer's rest pose**, and only works while
+  paused, so it never fights a job for the arm.
+- **The pause is saved**, so a restart stays paused.
+
 ### Behavior and caveats
 
 - **Cards first.** A waiting name tag or text job always runs before any
@@ -758,11 +774,13 @@ command as `paper` in its payload, so `name_tag_writer` must accept one, as
 | `enqueue_portrait` | `{"name": "Ada", "visitor": {…}}`, plus `"image_b64": "…"` to send the photo instead of reading `photo` | `{"job_id", "position"}` |
 | `enqueue_name_tag` | `{"name": "Ada Lovelace", "visitor": {…}}` | `{"job_id", "position"}` |
 | `enqueue_text` | `{"text": "Welcome", "cap_height_mm": 12, "fill": 0.6, "visitor": {…}}`; sent to the writer as `{"write": {"text", "cap_height_mm", "fill"}}`, bypassing `name_tag_command` | `{"job_id", "position"}` |
-| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary, and `needs_paper` while jobs wait for a sheet |
+| `status` | `{}` | `{"active", "waiting", "finished"}`, each a job summary, `paused: {"since"}` while paused, and `needs_paper` while jobs wait for a sheet |
 | `job` | `{"job_id": "…"}` | one job: `state` (`queued`, `active`, `paused`, `done`, `failed`, `canceled`), `position` while waiting, `polylines_done`/`polylines_total` for portraits, `text` for text jobs |
 | `cancel_job` | `{"job_id": "…"}` | the job, now `canceled`; an active portrait or card is stopped |
 | `retry_job` | `{"job_id": "…"}` | the job, back in the queue |
-| `resume` | `{}` | `status`, after jobs waiting for paper look again |
+| `pause` | `{}` | `status`; stops the arm at once and holds every job. See [Pausing](#pausing). |
+| `resume` | `{}` | `status`, after lifting a pause; jobs waiting for paper look again too |
+| `go_home` | `{}` | the drawer's `go_home` response; only while paused |
 
 `visitor` is stored with the job and returned in summaries, for whatever tells the
 visitor their portrait is ready.

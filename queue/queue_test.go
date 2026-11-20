@@ -117,6 +117,8 @@ func (f *fakeDrawer) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 			return map[string]interface{}{"polylines_done": float64(f.done)}, nil
 		case "cancel":
 			return map[string]interface{}{"canceled": true}, nil
+		case "go_home":
+			return map[string]interface{}{"status": "ok"}, nil
 		}
 	}
 	return nil, nil
@@ -952,4 +954,120 @@ func TestOnceTheQueueKnowsThereAreNoTagsATagDoesNotPauseThePortrait(t *testing.T
 	defer h.drawer.mu.Unlock()
 	test.That(t, len(h.drawer.draws), test.ShouldEqual, 1)
 	test.That(t, h.drawer.calls, test.ShouldNotContain, "pause")
+}
+
+func (h *harness) do(t *testing.T, verb string) map[string]interface{} {
+	t.Helper()
+	resp, err := h.q.DoCommand(context.Background(), map[string]interface{}{verb: map[string]interface{}{}})
+	test.That(t, err, test.ShouldBeNil)
+	return resp
+}
+
+func (h *harness) drawerCalled(verb string) bool {
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	for _, c := range h.drawer.calls {
+		if c == verb {
+			return true
+		}
+	}
+	return false
+}
+
+func expectNothingWritten(t *testing.T, w *fakeWriter) {
+	t.Helper()
+	select {
+	case name := <-w.wrote:
+		t.Fatalf("wrote %q while paused", name)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestPauseStopsAPortraitMidStrokeAndItResumesFromThatStroke(t *testing.T) {
+	h := newHarness(t)
+	h.q.start()
+	id := h.enqueue(t, "enqueue_portrait", map[string]interface{}{"image_b64": "x"})
+	h.waitDrawing(t)
+	h.drawer.step(t)
+	h.drawer.step(t)
+
+	resp := h.do(t, "pause")
+	test.That(t, resp["paused"], test.ShouldNotBeNil)
+	test.That(t, h.drawerCalled("cancel"), test.ShouldBeTrue)
+	h.waitState(t, id, statePaused)
+
+	h.do(t, "resume")
+	h.drawUntil(t, id, stateDone)
+	h.drawer.mu.Lock()
+	defer h.drawer.mu.Unlock()
+	test.That(t, h.drawer.starts, test.ShouldResemble, []int{0, 2})
+}
+
+func TestPauseStopsANameTagAndItGoesFirstOnResume(t *testing.T) {
+	h := newHarness(t)
+	h.writer.block = true
+	h.q.start()
+	ada := h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Grace"})
+
+	h.do(t, "pause")
+	test.That(t, h.drawerCalled("cancel"), test.ShouldBeTrue)
+	h.waitState(t, ada, stateQueued)
+	s, err := h.q.jobSummary(ada)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, s["position"], test.ShouldEqual, 1)
+	test.That(t, s["error"], test.ShouldBeNil)
+	expectNothingWritten(t, h.writer)
+
+	h.writer.mu.Lock()
+	h.writer.block = false
+	h.writer.mu.Unlock()
+	h.do(t, "resume")
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Ada")
+	test.That(t, <-h.writer.wrote, test.ShouldEqual, "Grace")
+}
+
+func TestPauseWhileIdleHoldsNewJobsUntilResume(t *testing.T) {
+	h := newHarness(t)
+	h.q.start()
+	h.do(t, "pause")
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+	expectNothingWritten(t, h.writer)
+
+	resp := h.do(t, "resume")
+	test.That(t, resp["paused"], test.ShouldBeNil)
+	select {
+	case name := <-h.writer.wrote:
+		test.That(t, name, test.ShouldEqual, "Ada")
+	case <-time.After(2 * time.Second):
+		t.Fatal("resume did not start the waiting tag")
+	}
+}
+
+func TestGoHomeOnlyWhilePaused(t *testing.T) {
+	h := newHarness(t)
+	h.q.start()
+	_, err := h.q.DoCommand(context.Background(), map[string]interface{}{"go_home": map[string]interface{}{}})
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "pause")
+	test.That(t, h.drawerCalled("go_home"), test.ShouldBeFalse)
+
+	h.do(t, "pause")
+	h.do(t, "go_home")
+	test.That(t, h.drawerCalled("go_home"), test.ShouldBeTrue)
+}
+
+func TestAPauseSurvivesARestart(t *testing.T) {
+	h := newHarness(t)
+	h.do(t, "pause")
+	h.enqueue(t, "enqueue_name_tag", map[string]interface{}{"name": "Ada"})
+
+	writer := &fakeWriter{wrote: make(chan string, 1)}
+	q := newWithClients(generic.Named("queue"), logging.NewTestLogger(t), newFakeDrawer(), &fakeGenerator{}, writer, &Config{}, h.state)
+	test.That(t, q.load(), test.ShouldBeNil)
+	q.start()
+	defer func() { test.That(t, q.Close(context.Background()), test.ShouldBeNil) }()
+	test.That(t, q.status()["paused"], test.ShouldNotBeNil)
+	expectNothingWritten(t, writer)
 }
