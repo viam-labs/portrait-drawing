@@ -538,7 +538,7 @@ def draw_headwear(hat, fw):
     return out
 
 
-def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0.25, min_clothes=0.4, min_hair=0.1, seed=5):
+def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0.25, min_clothes=0.4, min_hair=0.1, seed=5, max_strokes=0):
     L = landmarks(img)
     cat, face, hair, head = segments(img)
     fw = np.linalg.norm(L[234] - L[454])
@@ -591,7 +591,7 @@ def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0
         v10 = style_hybrid(img, cart, "realistic", "cartoon")
         kept = [p for p in kept if not inside(p)] + [p for p in v10 if inside(p)]
     # anchors drawn from landmarks, as in v10
-    s = kept
+    s = []
     for up, lo, ci, ring, a, b, um, lm in ((L_UP, L_LO, 468, [469, 470, 471, 472], 33, 133, 159, 145),
                                           (R_UP, R_LO, 473, [474, 475, 476, 477], 263, 362, 386, 374)):
         s += eye_v7(L, up, lo, ci, ring, a, b, um, lm, fw, "ring")
@@ -605,8 +605,20 @@ def style_v13(img, cart, res=1024, low=8, high=24, min_face=0.06, min_undereye=0
     if hat is not None: c2[hat] = 0
     if wears_glasses(c2, L): s += glasses_v7(c2, L, fw)
     if hat is not None:
-        s = clip_out(s, cv2.erode(hat.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0) + draw_headwear(hat, fw)[:1] + cap_text(img, hat, fw)
-    return [p for p in s if len(p) > 1]
+        brim = cv2.erode(hat.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        kept = clip_out(kept, brim)
+        s = clip_out(s, brim) + draw_headwear(hat, fw)[:1] + cap_text(img, hat, fw)
+    kept, s = [p for p in kept if len(p) > 1], [p for p in s if len(p) > 1]
+    # landmark features are what people recognise first, so a stroke budget comes out of the extracted lines
+    if max_strokes:
+        kept = longest(kept, max(0, max_strokes - len(s)))
+    return kept + s
+
+
+def longest(strokes, n):
+    """The n longest strokes, in their original order."""
+    keep = set(np.argsort([-length(p) for p in strokes], kind="stable")[:n].tolist())
+    return [p for i, p in enumerate(strokes) if i in keep]
 
 
 def face_fraction(face_width_px, img_shape):
@@ -615,7 +627,7 @@ def face_fraction(face_width_px, img_shape):
     return face_width_px / min(img_shape[:2])
 
 
-def sketch_polylines(img, min_face_fraction=0.12):
+def sketch_polylines(img, min_face_fraction=0.12, max_strokes=0):
     """Photo (BGR) in; pixel-space polylines and the size of the face crop they live in out."""
     if not itp._YUNET_PATH.exists():
         raise RuntimeError(f"sketch style: face model missing at {itp._YUNET_PATH}; first_run.sh downloads it")
@@ -630,27 +642,16 @@ def sketch_polylines(img, min_face_fraction=0.12):
     box = itp.face_crop_box(img, 0.7, 1.3, 1.1)
     if box:
         img = img[box[1]:box[3], box[0]:box[2]]
-    polylines = style_v13(img, anime(img))
+    polylines = style_v13(img, anime(img), max_strokes=max_strokes)
     return polylines, img.shape[:2]
 
 
-def simplify_and_order(polylines_mm, epsilon_mm=0.25, min_length_mm=1.0):
-    """Drop points the pen cannot resolve, drop strokes too short to see, and order the rest
-    nearest-first (flipping where that is shorter) so pen-up travel stays small."""
+def simplify_and_order(polylines_mm, epsilon_mm=0.25, min_length_mm=1.0, max_strokes=0, join_mm=0.0):
+    """Drop points the pen cannot resolve, drop strokes too short to see, then order,
+    join and cap the rest (see image_to_polylines.finish_strokes)."""
     strokes = []
     for p in polylines_mm:
         a = cv2.approxPolyDP(np.asarray(p, np.float32).reshape(-1, 1, 2), epsilon_mm, False)[:, 0, :].astype(float)
-        if len(a) >= 2 and np.linalg.norm(np.diff(a, axis=0), axis=1).sum() >= min_length_mm:
+        if len(a) >= 2 and length(a) >= min_length_mm:
             strokes.append(a)
-    out, cur, left = [], np.zeros(2), list(range(len(strokes)))
-    while left:
-        best = min(((np.linalg.norm(strokes[i][0] - cur), i, False) for i in left),
-                   key=lambda t: t[0])
-        best_rev = min(((np.linalg.norm(strokes[i][-1] - cur), i, True) for i in left),
-                       key=lambda t: t[0])
-        _, i, flip = min(best, best_rev, key=lambda t: t[0])
-        p = strokes[i][::-1] if flip else strokes[i]
-        out.append([[round(float(x), 2), round(float(y), 2)] for x, y in p])
-        left.remove(i)
-        cur = p[-1]
-    return out
+    return itp.finish_strokes(strokes, max_strokes, join_mm)

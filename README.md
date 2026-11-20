@@ -486,6 +486,8 @@ Every attribute is optional; the defaults are tuned for portraits.
 |---|---|---|
 | `style` | string | `lines` (default) traces the photo directly. `sketch` draws a cleaner, hand-sketched portrait — see [The sketch style](#the-sketch-style). The attributes below tune `lines` only. |
 | `min_face_fraction` | number | `sketch` only. Rejects a photo whose largest face is narrower than this share of the photo's shorter side, so an empty frame returns an error instead of drawing a face from the background. Default `0.12`. |
+| `max_strokes` | int | Both styles. Caps the number of strokes, since each one costs the arm about a second of pen lift and travel. The shortest go first; in `sketch` the landmark-drawn eyes, lips, brows and glasses are always kept. Default `110`; `0` removes the cap. `python/estimate_draw_time.py` estimates drawing time for a polyline set. |
+| `join_mm` | number | Both styles. Draws consecutive strokes as one where the next starts within this distance of where the last ended. Default `0.75`. |
 | `size` | int | Long side, in pixels, the model sees. Larger recovers finer features — lashes, nostrils — at a roughly linear cost in strokes. Default `768`. |
 | `clahe` | number | Local contrast lift before the model runs. Default `2.0`; `0` disables. |
 | `sigma` | number | Smoothing of the model response before ridges are traced. Default `2.2`. |

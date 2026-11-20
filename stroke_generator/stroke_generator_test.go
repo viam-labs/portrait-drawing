@@ -294,3 +294,24 @@ func TestBuildCLIArgs_minFaceFractionPassedThrough(t *testing.T) {
 	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
 	test.That(t, args, test.ShouldContainSubstring, "--min-face-fraction 0.2")
 }
+
+func TestConfigValidate_strokeBudget(t *testing.T) {
+	_, _, err := (&Config{MaxStrokes: ptr(0), JoinMM: ptr(0.0)}).Validate("")
+	test.That(t, err, test.ShouldBeNil)
+	_, _, err = (&Config{MaxStrokes: ptr(-1)}).Validate("")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "max_strokes")
+	_, _, err = (&Config{JoinMM: ptr(-0.5)}).Validate("")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "join_mm")
+}
+
+func TestBuildCLIArgs_strokeBudget(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{}}
+	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldNotContainSubstring, "--max-strokes")
+	test.That(t, args, test.ShouldNotContainSubstring, "--join-mm")
+
+	s = &strokeGenerator{cfg: &Config{MaxStrokes: ptr(90), JoinMM: ptr(0.5)}}
+	args = strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldContainSubstring, "--max-strokes 90")
+	test.That(t, args, test.ShouldContainSubstring, "--join-mm 0.5")
+}

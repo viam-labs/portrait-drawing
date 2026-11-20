@@ -44,6 +44,15 @@ type Config struct {
 	// narrower than this share of its shorter side, so an empty frame errors
 	// instead of drawing a face from the background. Nil uses 0.12.
 	MinFaceFraction *float64 `json:"min_face_fraction,omitempty"`
+	// MaxStrokes caps how many strokes a drawing has, dropping the shortest
+	// first; each costs the arm about a second of pen lift and travel. In the
+	// sketch style the landmark-drawn eyes, lips, brows and glasses are kept
+	// and the budget comes out of the extracted lines. Nil uses 110; 0 lifts
+	// the cap.
+	MaxStrokes *int `json:"max_strokes,omitempty"`
+	// JoinMM draws consecutive strokes as one where the next starts within
+	// this distance of where the last ended. Nil uses 0.75.
+	JoinMM *float64 `json:"join_mm,omitempty"`
 
 	// Pointer knobs are nil-as-omitted so the Python pipeline's own default
 	// applies; an explicit 0 is honoured.
@@ -121,10 +130,14 @@ func (cfg *Config) Validate(_ string) ([]string, []string, error) {
 		"crop_above":   cfg.CropAbove,
 		"crop_below":   cfg.CropBelow,
 		"crop_sides":   cfg.CropSides,
+		"join_mm":      cfg.JoinMM,
 	} {
 		if v != nil && *v < 0 {
 			return nil, nil, fmt.Errorf("%s must be >= 0, got %g", name, *v)
 		}
+	}
+	if cfg.MaxStrokes != nil && *cfg.MaxStrokes < 0 {
+		return nil, nil, fmt.Errorf("max_strokes must be >= 0, got %d", *cfg.MaxStrokes)
 	}
 	if cfg.Size != nil && *cfg.Size < 64 {
 		return nil, nil, fmt.Errorf("size must be >= 64, got %d", *cfg.Size)
@@ -275,6 +288,9 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 	if s.cfg.Size != nil {
 		args = append(args, "--size", strconv.Itoa(*s.cfg.Size))
 	}
+	if s.cfg.MaxStrokes != nil {
+		args = append(args, "--max-strokes", strconv.Itoa(*s.cfg.MaxStrokes))
+	}
 	for flag, v := range map[string]*float64{
 		"--clahe":        s.cfg.Clahe,
 		"--sigma":        s.cfg.Sigma,
@@ -285,6 +301,7 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 		"--crop-above":   s.cfg.CropAbove,
 		"--crop-below":   s.cfg.CropBelow,
 		"--crop-sides":   s.cfg.CropSides,
+		"--join-mm":      s.cfg.JoinMM,
 	} {
 		if v != nil {
 			args = append(args, flag, strconv.FormatFloat(*v, 'f', -1, 64))

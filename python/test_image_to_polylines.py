@@ -7,6 +7,7 @@ from image_to_polylines import (
     decode_depth,
     depth_mask,
     face_crop_box,
+    finish_strokes,
     isolate,
     image_bytes_to_polylines,
     polylines_to_mm,
@@ -193,3 +194,24 @@ def test_depth_mask_near_bound_drops_the_foreground():
 
 def test_face_crop_box_none_without_a_face():
     assert face_crop_box(np.zeros((80, 80, 3), np.uint8), 1.0, 1.0, 1.0) is None
+
+
+def test_finish_strokes_joins_strokes_that_meet():
+    out = finish_strokes([[[0, 0], [10, 0]], [[10.5, 0], [20, 0]]], max_strokes=0, join_mm=0.75)
+    assert out == [[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]]]
+
+
+def test_finish_strokes_keeps_a_visible_gap():
+    out = finish_strokes([[[0, 0], [10, 0]], [[12, 0], [20, 0]]], max_strokes=0, join_mm=0.75)
+    assert len(out) == 2
+
+
+def test_finish_strokes_drops_the_shortest_over_the_cap():
+    strokes = [[[0, y], [length, y]] for y, length in ((0, 30), (10, 2), (20, 40), (30, 5))]
+    out = finish_strokes(strokes, max_strokes=2, join_mm=0)
+    assert sorted(round(abs(p[-1][0] - p[0][0])) for p in out) == [30, 40]
+
+
+def test_finish_strokes_orders_nearest_first():
+    out = finish_strokes([[[100, 0], [110, 0]], [[20, 0], [10, 0]]], max_strokes=0, join_mm=0)
+    assert out == [[[10.0, 0.0], [20.0, 0.0]], [[100.0, 0.0], [110.0, 0.0]]]

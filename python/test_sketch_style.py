@@ -27,6 +27,18 @@ def test_order_starts_nearest_and_flips_strokes_to_shorten_travel():
     assert out[1] == [[100.0, 0.0], [110.0, 0.0]]
 
 
+def test_simplify_caps_and_joins():
+    touching = [[[0.0, 0.0], [10.0, 0.0]], [[10.2, 0.0], [20.0, 0.0]]]
+    short = [[[50.0, 50.0], [52.0, 50.0]]]
+    out = sketch_style.simplify_and_order(touching + short, max_strokes=1, join_mm=0.75)
+    assert out == [[[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]]]
+
+
+def test_longest_keeps_the_longest_in_their_order():
+    strokes = [np.array([[0, 0], [n, 0]], float) for n in (5, 1, 9, 3)]
+    assert [p[1, 0] for p in sketch_style.longest(strokes, 2)] == [5, 9]
+
+
 def test_line_map_is_same_size_dark_lines_on_white():
     img = np.full((300, 220, 3), 255, np.uint8)
     cv2.circle(img, (110, 150), 60, (0, 0, 0), 4)
