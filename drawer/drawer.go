@@ -1134,7 +1134,7 @@ const maxStrokeStepMM = 1.0
 // pen-up, as one move: moving point to point, the arm stops and starts at every
 // one, which is slow and jolts a wrist force sensor by more than a pen presses.
 // Travel and the descent to the paper stay moves of their own, so the guard
-// still checks the descent against its lower limit.
+// still checks the descent against its contact limit.
 func strokeMoves(wps []waypoint) []drawMove {
 	var out []drawMove
 	for i := 0; i < len(wps); i++ {

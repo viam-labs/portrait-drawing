@@ -193,9 +193,10 @@ func (d *drawer) touchOff(
 	return plane, nil
 }
 
-// Every move down is guarded like a drawing's: a capped pen, being longer, meets
-// the paper on the way down to the start of a touch, and trips the lower limit
-// there. The lift is not: moving away can only ease the force, and a guard that
+// The move down to the start of a touch is guarded like a drawing's descent: a
+// capped pen, being longer, meets the paper on the way and trips the contact
+// limit there. Each step after it is checked still, against max_force. The
+// lift is not guarded: moving away can only ease the force, and a guard that
 // stopped it would leave the pen pressing.
 func (d *drawer) touchOne(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, p r3.Vector, orientation spatialmath.Orientation,

@@ -124,9 +124,10 @@ Allowances apply to every move the drawer plans, travel and drawing alike.
 
 ### A cap left on the marker
 
-A capped marker is longer and blunter than a bare tip: it reaches the paper
-before the pen is all the way down, and it pushes back harder once it is there.
-`force_guard` watches a `sensor` component for both. This example is for a
+A capped marker is longer than a bare tip: it reaches the paper before the pen
+is all the way down. `force_guard` watches a `sensor` component for that early
+contact. Force with the pen on the paper does not stop a drawing: a rigid pen on
+an uneven sheet presses as hard with the cap off. This example is for a
 `viam:ufactory:ft_sensor`, whose readings are in newtons:
 
 ```json
@@ -143,7 +144,7 @@ before the pen is all the way down, and it pushes back harder once it is there.
 |---|---|---|---|
 | `sensor` | string | **yes** | A sensor component whose readings include the force on the pen. |
 | `reading` | string | **yes** | The key in the sensor's readings to watch: the axis the pen pushes along, `Fz_N` for a pen in line with the wrist. |
-| `max_force` | number | **yes** | The limit while the pen is on the paper, in the sensor's own units, measured from the baseline below. Set it a little above the most you see in a normal drawing. |
+| `max_force` | number | **yes** | The most one still step of a [touch-off](#finding-the-paper-by-touch) may press, in the sensor's own units. Strokes are not held to it. |
 | `contact_force` | number | **yes** | The limit while the pen is more than `contact_margin_mm` above the paper, where a bare tip touches nothing. Set it above what the sensor reads while the arm travels with the pen lifted. |
 | `contact_margin_mm` | number | no | How far above the paper the early-contact check ends. Defaults to 2, and must be less than `lift_off_z_mm`. |
 | `retreat_pose` | string | no | An `erh:vmodutils:arm-position-saver` switch the arm goes to after the guard stops a drawing, somewhere a person can reach the pen to take the cap off. Without it the arm goes to `home_pose`. |
@@ -151,7 +152,7 @@ before the pen is all the way down, and it pushes back harder once it is there.
 A wrist sensor reads the weight of the pen holder and its own bias even with
 nothing touching — tens of newtons is normal. So every draw and every `resume`
 first holds the pen 40 mm above the first stroke, averages the reading there,
-and measures both limits from that baseline, in either direction. The sensor's
+and measures the force from that baseline, in either direction. The sensor's
 own zero is left alone. If those samples are all identical the draw fails
 before it starts: a live sensor always has noise, and a `ft_sensor` whose
 controller stream is off reads exactly zero on every axis, which would
@@ -165,7 +166,7 @@ the arm's controller if the sensor latched an overload.
 
 The sensor is polled every 20 ms through every move of a drawing. Each descent
 is made in two moves, down to the margin and then onto the paper, so the limit
-changes at a known height. When a limit is passed the arm stops, lifts the pen
+ends at a known height. When `contact_force` is passed the arm stops, lifts the pen
 straight up, and goes to `retreat_pose`, or else the rest pose. `status` then reports the job as
 `failed` with `"fault": "excess_force"`, and it stays resumable: take the cap
 off and send `resume`, which redraws the stroke that tripped. A sensor that
@@ -184,9 +185,9 @@ logs what the force did over its baseline, and `status` keeps the latest as
 }
 ```
 
-`pen_down` is what `max_force` is held to and `lifted` what `contact_force` is,
-so these are the numbers to set them from: start with both limits generous,
-draw with the cap off, and bring each down to a margin above its `peak`.
+`lifted` is what `contact_force` is held to, so set it from that: start
+generous, draw with the cap off, and bring it down to a margin above the
+`peak`. `pen_down` is reported only, to show how hard the pen presses.
 
 ### Finding the paper by touch
 
@@ -216,9 +217,10 @@ sheet keeps its plane.
 | `step_mm`, `fine_step_mm` | number | no | Steps before and after the pen first feels the paper. Default 0.2 and 0.05. |
 | `max_depth_mm` | number | no | How far below the configured height a touch may go before it gives up. Default 1.5. |
 
-It needs `force_guard`. Every move down is guarded as in a drawing, so a capped
-pen meets the paper on its way to the start of a touch and trips there; the lift
-after each touch is not, since moving away can only ease the force. A touch that
+It needs `force_guard`. The move down to the start of a touch is guarded as a
+drawing's descent is, so a capped pen meets the paper on its way there and
+trips; a step that presses past `max_force` also stops the drawing. The lift
+after each touch is not guarded, since moving away can only ease the force. A touch that
 feels nothing, or a plane steeper than 1 mm per 100 mm, fails the drawing. The
 log reports each touch and the plane's slope.
 

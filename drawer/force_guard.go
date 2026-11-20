@@ -30,13 +30,14 @@ const (
 	retreatPosition = 2
 )
 
-// ForceGuardConfig stops a drawing when the pen meets more resistance than a
-// bare marker tip should, which is what a cap left on looks like.
+// ForceGuardConfig stops a drawing when the pen meets resistance above the
+// paper, where a bare marker tip touches nothing and a cap left on does.
 type ForceGuardConfig struct {
 	Sensor string `json:"sensor"`
 	// Reading is the key in the sensor's Readings that carries the force.
 	Reading string `json:"reading"`
-	// MaxForce is the most the sensor reads in a normal drawing with the pen down.
+	// MaxForce is the most one still step of a touch-off may press. Strokes are
+	// not held to it: a rigid pen on an uneven sheet passes it with the cap off.
 	MaxForce float64 `json:"max_force"`
 	// ContactForce is the limit while the pen is still more than ContactMarginMM
 	// above the paper, where a bare tip touches nothing.
@@ -87,14 +88,18 @@ type forceGuard struct {
 	reading string
 	max     float64
 	contact float64
+	// drawing is the limit with the pen on the paper. Nothing sets it yet, so
+	// strokes are held to none; 0 means no limit.
+	drawing float64
 	retreat positioner
 }
 
-func (g *forceGuard) limit(clear bool) float64 {
+// limit is what a move's force is held to, and whether it is held to anything.
+func (g *forceGuard) limit(clear bool) (float64, bool) {
 	if clear {
-		return g.contact
+		return g.contact, true
 	}
-	return g.max
+	return g.drawing, g.drawing > 0
 }
 
 // measureBaseline averages the reading with the pen held still in the air. A
@@ -175,7 +180,8 @@ func (s *forceStats) summary() map[string]interface{} {
 }
 
 // forceRun is one draw's baseline and what the force did over it, split the way
-// the limits are: lifted is what contact_force is held to, penDown max_force.
+// the limits are: lifted is what contact_force is held to, penDown the drawing
+// limit.
 type forceRun struct {
 	baseline        float64
 	lifted, penDown forceStats
@@ -254,8 +260,8 @@ func (e *excessForceError) Error() string {
 }
 
 // guardedMove is planAndExecuteThrough with the force watched for the whole
-// move. clear marks a move that stays above the paper, held to the lower
-// contact limit.
+// move. clear marks a move that stays above the paper, held to the contact
+// limit; the rest are held to the drawing limit.
 func (d *drawer) guardedMove(
 	ctx context.Context, fs *referenceframe.FrameSystem, targets []spatialmath.Pose, run *forceRun, linear, clear bool,
 	options *arm.MoveOptions,
@@ -266,12 +272,13 @@ func (d *drawer) guardedMove(
 }
 
 // watchForce runs move, canceling it and stopping the arm if the force strays
-// from the run's baseline by more than the limit, either way, or cannot be read.
+// from the run's baseline by more than the move's limit, either way, or cannot
+// be read.
 func (d *drawer) watchForce(ctx context.Context, run *forceRun, clear bool, move func(context.Context) error) error {
 	if d.forceGuard == nil {
 		return move(ctx)
 	}
-	limit := d.forceGuard.limit(clear)
+	limit, limited := d.forceGuard.limit(clear)
 	moveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tripped := make(chan error, 1)
@@ -296,7 +303,7 @@ func (d *drawer) watchForce(ctx context.Context, run *forceRun, clear bool, move
 				tripped <- fmt.Errorf("force_guard: read %q: %w", d.forceGuard.reading, err)
 			case run.repeats >= frozenPolls:
 				tripped <- &frozenForceError{reading: d.forceGuard.reading, value: raw}
-			case force > limit:
+			case limited && force > limit:
 				tripped <- &excessForceError{force: force, limit: limit, clear: clear}
 			default:
 				select {

@@ -116,9 +116,30 @@ func TestWatchForce_normalForceLetsTheMoveFinish(t *testing.T) {
 
 func TestWatchForce_excessForceStopsTheArm(t *testing.T) {
 	d, stops := guardedDrawer(t, func() (interface{}, error) { return -7.5, nil })
-	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
+	err := d.watchForce(context.Background(), &forceRun{}, true, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 	test.That(t, err.Error(), test.ShouldContainSubstring, "cap")
+	test.That(t, stops.Load(), test.ShouldEqual, 1)
+}
+
+func TestWatchForce_forceOnThePaperDoesNotStopAStroke(t *testing.T) {
+	var n atomic.Int32
+	d, stops := guardedDrawer(t, func() (interface{}, error) { return 9 + 0.001*float64(n.Add(1)%3), nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*forcePollInterval)
+	defer cancel()
+	run := &forceRun{}
+	err := d.watchForce(ctx, run, false, untilCanceled)
+	test.That(t, errors.Is(err, context.DeadlineExceeded), test.ShouldBeTrue)
+	test.That(t, stops.Load(), test.ShouldEqual, 0)
+	test.That(t, run.penDown.peak, test.ShouldBeGreaterThan, 5.0)
+}
+
+func TestWatchForce_aDrawingLimitStopsAStroke(t *testing.T) {
+	d, stops := guardedDrawer(t, func() (interface{}, error) { return 9.0, nil })
+	d.forceGuard.drawing = 8
+	err := d.watchForce(context.Background(), &forceRun{}, false, untilCanceled)
+	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
+	test.That(t, err.Error(), test.ShouldContainSubstring, "with the pen on the paper")
 	test.That(t, stops.Load(), test.ShouldEqual, 1)
 }
 
@@ -136,7 +157,7 @@ func TestWatchForce_measuresFromTheBaseline(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, stops.Load(), test.ShouldEqual, 0)
 
-	err = d.watchForce(context.Background(), &forceRun{baseline: -12.0}, false, untilCanceled)
+	err = d.watchForce(context.Background(), &forceRun{baseline: -12.0}, true, untilCanceled)
 	test.That(t, faultOf(err), test.ShouldEqual, faultExcessForce)
 }
 
