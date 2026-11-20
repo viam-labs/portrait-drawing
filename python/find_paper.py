@@ -33,6 +33,10 @@ TAG_MM = (85.0, 57.0)
 # Mat brightness is fitted as a smooth surface; a sheet must stand this far
 # above it. The Cricut grid lines reach about 26, a dim tag border over 30.
 BRIGHT_ABOVE_MAT = 29
+# A black mat reads below this lightness (0-255); the table and sheets well above.
+MAT_DARK_L = 90
+MIN_DARK_MAT_FRACTION = 0.2
+BLACK_MAT_SHEET_L = 130
 # Smallest sheet, in pixels of area, so grid squares and scraps are ignored.
 MIN_SHEET_PX = 8000
 MIN_RECT_FILL = 0.9
@@ -55,16 +59,24 @@ def read_image(data):
 
 
 def mat_region(lab):
-    """The mat: the big region that isn't the reddish wooden table around it."""
-    mat = (lab[..., 1] < 134).astype(np.uint8) * 255
-    mat = cv2.morphologyEx(mat, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
-    contours, _ = cv2.findContours(mat, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None, None
-    hull = cv2.convexHull(max(contours, key=cv2.contourArea))
-    inside = np.zeros(mat.shape, np.uint8)
+    """The mat: a black one if most of the view is dark, else the big region
+    that isn't the reddish wooden table around a green one."""
+    dark = (lab[..., 0] < MAT_DARK_L).astype(np.uint8) * 255
+    dark = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+    contours, _ = cv2.findContours(dark, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    biggest = max(contours, key=cv2.contourArea) if contours else None
+    black = biggest is not None and cv2.contourArea(biggest) >= MIN_DARK_MAT_FRACTION * dark.size
+    if not black:
+        mat = (lab[..., 1] < 134).astype(np.uint8) * 255
+        mat = cv2.morphologyEx(mat, cv2.MORPH_OPEN, np.ones((15, 15), np.uint8))
+        contours, _ = cv2.findContours(mat, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None, None, False
+        biggest = max(contours, key=cv2.contourArea)
+    hull = cv2.convexHull(biggest)
+    inside = np.zeros(lab.shape[:2], np.uint8)
     cv2.drawContours(inside, [hull], -1, 255, -1)
-    return hull, cv2.erode(inside, np.ones((9, 9), np.uint8))
+    return hull, cv2.erode(inside, np.ones((9, 9), np.uint8)), black
 
 
 def mat_background(lightness, inside):
@@ -195,6 +207,32 @@ def find_logo(gray, mask, template):
     return best
 
 
+def find_logo_square(gray, mask, template, corners):
+    """find_logo on the tag turned square to the image first: the template
+    matches only at whole quarter turns, and a tag lying at an angle between
+    them scored too low to be read the right way up."""
+    edge = corners[1] - corners[0]
+    deg = math.degrees(math.atan2(edge[1], edge[0]))
+    deg = (deg + 45) % 90 - 45
+    centre = tuple(float(v) for v in corners.mean(0))
+    turn = cv2.getRotationMatrix2D(centre, deg, 1.0)
+    h, w = gray.shape
+    logo = find_logo(cv2.warpAffine(gray, turn, (w, h), flags=cv2.INTER_LINEAR, borderValue=0),
+                     cv2.warpAffine(mask, turn, (w, h), flags=cv2.INTER_NEAREST), template)
+    if logo is None:
+        return None
+    back = cv2.invertAffineTransform(turn)
+    x, y, bw, bh = logo["box"]
+    box = np.array([[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]], float)
+    box = box @ back[:, :2].T + back[:, 2]
+    bx, by = box.min(0)
+    ex, ey = box.max(0)
+    logo["box"] = [int(bx), int(by), int(math.ceil(ex - bx)), int(math.ceil(ey - by))]
+    logo["up"] = tuple(float(v) for v in back[:, :2] @ np.array(logo["up"]))
+    logo["rotation"] = int(round((logo["rotation"] - deg) % 360))
+    return logo
+
+
 def ink_strokes(lightness, mask, px_per_mm, exclude=None):
     """Dark marks inside mask: (long side, short side) in mm for each one."""
     if not mask.any():
@@ -221,11 +259,16 @@ def find_sheets(img, template):
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(float)
     lightness = lab[..., 0]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    hull, inside = mat_region(lab)
+    hull, inside, black = mat_region(lab)
     if hull is None:
-        return {"sheets": [], "mat_px": []}
-    bg = mat_background(lightness, inside)
-    bright = (((lightness - bg) > BRIGHT_ABOVE_MAT) & (inside > 0)).astype(np.uint8) * 255
+        return {"sheets": [], "rejected": [], "mat_px": []}
+    if black:
+        # Glare lifts parts of a black mat to 80 or more, sharper than a smooth
+        # fit follows, but a sheet's border stays far above it.
+        above = lightness > BLACK_MAT_SHEET_L
+    else:
+        above = (lightness - mat_background(lightness, inside)) > BRIGHT_ABOVE_MAT
+    bright = (above & (inside > 0)).astype(np.uint8) * 255
     bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
     # Fill each outline (a tag's label is darker than its border), then open with
     # a big kernel: solid sheets survive, thin lines touching them don't.
@@ -268,7 +311,7 @@ def find_sheets(img, template):
         # Keep ink checks off the sheet's edge, where the border meets the mat.
         interior = cv2.erode(filled, np.ones((int(3 * px_per_mm) | 1,) * 2, np.uint8))
         if kind == "name_tag":
-            logo = find_logo(gray, interior, template)
+            logo = find_logo_square(gray, interior, template, corners)
             if logo and logo["score"] >= LOGO_MIN_SCORE:
                 corners = reading_order(corners, np.array(logo["up"]))
                 sheet["logo"] = {"rotation": logo["rotation"], "score": round(logo["score"], 2), "box_px": logo["box"]}

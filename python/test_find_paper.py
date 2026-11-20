@@ -45,7 +45,7 @@ def test_card_corners_run_clockwise_from_a_short_top_edge():
 def test_tag_reads_from_its_logo():
     by_kind, _ = sheets_of(MAT)
     tag = by_kind["name_tag"]
-    assert tag["logo"]["rotation"] == 180
+    assert abs(tag["logo"]["rotation"] - 180) <= 5
     # Upside down in the image, so its top-left is the image's bottom-right.
     tl = np.array(tag["corners_px"][0])
     centre = np.mean(tag["corners_px"], 0)
@@ -56,7 +56,7 @@ def test_turning_the_photo_turns_the_tag_reading():
     turned = cv2.rotate(MAT, cv2.ROTATE_90_CLOCKWISE)
     by_kind, _ = sheets_of(turned)
     tag = by_kind["name_tag"]
-    assert tag["logo"]["rotation"] == 270
+    assert abs(tag["logo"]["rotation"] - 270) <= 5
     tl = np.array(tag["corners_px"][0])
     centre = np.mean(tag["corners_px"], 0)
     # The original top-left (image bottom-right) turns to the bottom-left.
@@ -134,3 +134,16 @@ def test_cli_sheets_round_trip():
     out = subprocess.run([sys.executable, str(HERE / "find_paper.py"), "sheets"], input=raw,
                          capture_output=True, check=True)
     assert len(json.loads(out.stdout)["sheets"]) == 2
+
+
+
+def test_a_black_mat_with_tilted_tags():
+    found = find_sheets(cv2.imread(str(HERE / "testdata" / "black_mat.jpg")),
+                        cv2.imread(str(DEFAULT_LOGO), cv2.IMREAD_GRAYSCALE))["sheets"]
+    tags = [s for s in found if s["kind"] == "name_tag"]
+    cards = [s for s in found if s["kind"] == "card"]
+    assert len(tags) == 8
+    assert all(t["logo"] and t["logo"]["score"] > 0.8 for t in tags)
+    # The fifth card has a corner hidden under the arm's shadow.
+    assert len(cards) == 4
+    assert not any(s["used"] for s in found)
