@@ -768,7 +768,8 @@ A tag reads the way its Viam logo does, wherever the logo sits on the label.
 
 Pixels become arm positions through a homography fitted by `calibrate`: the
 drawer draws a small cross at each of `calibration_points` on paper laid over
-the mat, and the finder photographs them from the survey pose and matches each
+the mat, each as a drawing of its own so it touches off on its own sheet, and
+the finder photographs them from the survey pose and matches each
 cross to the point that drew it. The fit is saved in the module's data
 directory, so it survives restarts; run it again when the mat, the camera or
 the survey pose moves. A new pen holder that keeps the pen on the same axis
@@ -802,7 +803,7 @@ calibration too, which then takes the offset into account.
 | `tool_orientation` | orientation | **yes** | The pen-down orientation every returned paper carries. |
 | `pen_down_z` | number | **yes** | The arm's Z with the pen tip on the mat. |
 | `calibration_points` | array | for `calibrate` | At least 5 arm X/Y positions spread across the camera's view, on paper. An uneven layout is fine: the crosses are matched to points by position, not by order. |
-| `cross_mm` | number | no | Calibration cross size. Default 10. |
+| `cross_mm` | number | no | Calibration cross size. Default 10. The detector needs a cross at least 16 px across in the survey photo; from a high survey pose that takes 20–25 mm. |
 | `near` | position | no | What "nearest" means when sorting sheets. Default the arm's base. |
 | `card_width_mm`, `card_height_mm` | number | no | Default 101.6 x 152.4 (4 x 6 in). |
 | `name_tag_width_mm`, `name_tag_height_mm` | number | no | The label's writing area, inside its white backing. Default 82 x 53. |

@@ -545,17 +545,19 @@ func (f *paperFinder) calibrate(ctx context.Context, payload interface{}) (map[s
 		return nil, errors.New("paper-finder: calibration_points is not set")
 	}
 	if a.Redraw == nil || *a.Redraw {
-		draw, err := f.crossesDrawCommand()
+		draws, err := f.crossDrawCommands()
 		if err != nil {
 			return nil, fmt.Errorf("paper-finder: %w", err)
 		}
-		f.logger.Infof("paper-finder: drawing %d calibration crosses", len(f.cfg.CalibrationPoints))
-		resp, err := f.drawer.DoCommand(ctx, draw)
-		if err != nil {
-			return nil, fmt.Errorf("paper-finder: draw calibration crosses: %w", err)
-		}
-		if paused, _ := resp["paused"].(bool); paused {
-			return nil, errors.New("paper-finder: the drawer was paused while drawing the calibration crosses")
+		for i, draw := range draws {
+			f.logger.Infof("paper-finder: drawing calibration cross %d of %d", i+1, len(draws))
+			resp, err := f.drawer.DoCommand(ctx, draw)
+			if err != nil {
+				return nil, fmt.Errorf("paper-finder: draw calibration cross %d: %w", i+1, err)
+			}
+			if paused, _ := resp["paused"].(bool); paused {
+				return nil, errors.New("paper-finder: the drawer was paused while drawing the calibration crosses")
+			}
 		}
 	}
 	img, err := f.photo(ctx)
@@ -612,41 +614,34 @@ func (f *paperFinder) calibrate(ctx context.Context, payload interface{}) (map[s
 	}, nil
 }
 
-// crossesDrawCommand lays the crosses out on one page that spans the
-// calibration points, which the drawer draws like any other paper.
-func (f *paperFinder) crossesDrawCommand() (map[string]interface{}, error) {
+// crossDrawCommands is one draw per cross, each on its own small page around
+// its point: the crosses go on separate sheets, which on a soft mat sit at
+// heights a single touched plane through three of them does not fit.
+func (f *paperFinder) crossDrawCommands() ([]map[string]interface{}, error) {
 	if f.drawer == nil {
 		return nil, errors.New("drawer is not set")
 	}
-	pts := f.cfg.CalibrationPoints
 	half := f.cfg.CrossMM / 2
 	margin := half + 5
-	minX, maxX, minY, maxY := pts[0].X, pts[0].X, pts[0].Y, pts[0].Y
-	for _, p := range pts[1:] {
-		minX, maxX = math.Min(minX, p.X), math.Max(maxX, p.X)
-		minY, maxY = math.Min(minY, p.Y), math.Max(maxY, p.Y)
-	}
-	// The page's top-left is its smallest X and largest Y, running +X across and -Y down.
-	left, top := minX-margin, maxY+margin
-	polylines := make([]interface{}, 0, 2*len(pts))
-	for _, p := range pts {
-		x, y := p.X-left, top-p.Y
-		polylines = append(polylines,
-			[]interface{}{[]float64{x - half, y}, []float64{x + half, y}},
-			[]interface{}{[]float64{x, y - half}, []float64{x, y + half}},
-		)
-	}
-	return map[string]interface{}{"draw": map[string]interface{}{
-		"polylines": polylines,
-		"paper": map[string]interface{}{
-			"top_left_corner": map[string]interface{}{
-				"translation": map[string]interface{}{"x": left, "y": top, "z": *f.cfg.PenDownZ},
-				"orientation": f.orientation,
+	out := make([]map[string]interface{}, 0, len(f.cfg.CalibrationPoints))
+	for _, p := range f.cfg.CalibrationPoints {
+		// The page's top-left is its smallest X and largest Y, running +X across and -Y down.
+		out = append(out, map[string]interface{}{"draw": map[string]interface{}{
+			"polylines": []interface{}{
+				[]interface{}{[]float64{margin - half, margin}, []float64{margin + half, margin}},
+				[]interface{}{[]float64{margin, margin - half}, []float64{margin, margin + half}},
 			},
-			"width_mm":  maxX - minX + 2*margin,
-			"height_mm": maxY - minY + 2*margin,
-		},
-	}}, nil
+			"paper": map[string]interface{}{
+				"top_left_corner": map[string]interface{}{
+					"translation": map[string]interface{}{"x": p.X - margin, "y": p.Y + margin, "z": *f.cfg.PenDownZ},
+					"orientation": f.orientation,
+				},
+				"width_mm":  2 * margin,
+				"height_mm": 2 * margin,
+			},
+		}})
+	}
+	return out, nil
 }
 
 func (f *paperFinder) Status(_ context.Context) (map[string]interface{}, error) {

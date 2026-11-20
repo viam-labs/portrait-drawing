@@ -248,23 +248,24 @@ func TestCalibrate_drawsACrossAtEachPoint(t *testing.T) {
 	f, _, _, dr, _ := newTestFinder(t, calibrationConfig(), map[string]string{"crosses": `{"crosses":[]}`, "fit": fitOK})
 	_, err := f.DoCommand(context.Background(), map[string]interface{}{"calibrate": nil})
 	test.That(t, err, test.ShouldBeNil)
-	test.That(t, len(dr.cmds), test.ShouldEqual, 1)
+	// One draw per cross, so each touches off on its own sheet.
+	test.That(t, len(dr.cmds), test.ShouldEqual, 5)
 	draw := dr.cmds[0]["draw"].(map[string]interface{})
 	polylines := draw["polylines"].([]interface{})
-	test.That(t, len(polylines), test.ShouldEqual, 10)
+	test.That(t, len(polylines), test.ShouldEqual, 2)
 
 	paper := draw["paper"].(map[string]interface{})
 	tl := paper["top_left_corner"].(map[string]interface{})["translation"].(map[string]interface{})
 	margin := defaultCrossMM/2 + 5
+	// The first point is (150, -100), at the middle of its page.
 	test.That(t, tl["x"], test.ShouldEqual, 150-margin)
-	test.That(t, tl["y"], test.ShouldEqual, 100+margin)
+	test.That(t, tl["y"], test.ShouldEqual, -100+margin)
 	test.That(t, tl["z"], test.ShouldEqual, 290.0)
-	test.That(t, paper["width_mm"], test.ShouldEqual, 150+2*margin)
-	test.That(t, paper["height_mm"], test.ShouldEqual, 200+2*margin)
-	// The first point, (150, -100), is margin in from the page's left and 200+margin down.
+	test.That(t, paper["width_mm"], test.ShouldEqual, 2*margin)
+	test.That(t, paper["height_mm"], test.ShouldEqual, 2*margin)
 	first := polylines[0].([]interface{})
-	test.That(t, first[0], test.ShouldResemble, []float64{margin - defaultCrossMM/2, 200 + margin})
-	test.That(t, first[1], test.ShouldResemble, []float64{margin + defaultCrossMM/2, 200 + margin})
+	test.That(t, first[0], test.ShouldResemble, []float64{margin - defaultCrossMM/2, margin})
+	test.That(t, first[1], test.ShouldResemble, []float64{margin + defaultCrossMM/2, margin})
 }
 
 func TestCalibrate_fitsCrossesToTheArmPointsAndKeepsTheResult(t *testing.T) {
