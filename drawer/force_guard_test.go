@@ -375,7 +375,7 @@ func TestConfigValidate_lineTolerance(t *testing.T) {
 }
 
 func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T) {
-	limits, err := parseStrokeLimits(map[string]interface{}{"polylines": []interface{}{}, "stroke_speed_degs_per_sec": 15.0})
+	limits, park, err := parseDrawOptions(map[string]interface{}{"polylines": []interface{}{}, "stroke_speed_degs_per_sec": 15.0})
 	test.That(t, err, test.ShouldBeNil)
 	got := limits.or(strokeLimits{speed: 30, acceleration: 120})
 	test.That(t, got, test.ShouldResemble, strokeLimits{speed: 15, acceleration: 120})
@@ -383,8 +383,13 @@ func TestStrokeLimits_aDrawOverridesTheConfigAndBecomesMoveOptions(t *testing.T)
 	test.That(t, opts.MaxVelRads, test.ShouldAlmostEqual, 15*math.Pi/180)
 	test.That(t, opts.MaxAccRads, test.ShouldAlmostEqual, 120*math.Pi/180)
 	test.That(t, strokeLimits{}.moveOptions(), test.ShouldBeNil)
+	test.That(t, park, test.ShouldBeFalse)
 
-	_, err = parseStrokeLimits(map[string]interface{}{"stroke_speed_degs_per_sec": -1.0})
+	_, park, err = parseDrawOptions(map[string]interface{}{"finish_at_retreat_pose": true})
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, park, test.ShouldBeTrue)
+
+	_, _, err = parseDrawOptions(map[string]interface{}{"stroke_speed_degs_per_sec": -1.0})
 	test.That(t, err, test.ShouldNotBeNil)
 }
 

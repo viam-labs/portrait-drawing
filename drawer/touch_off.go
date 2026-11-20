@@ -169,12 +169,12 @@ func touchPointsFor(polylines []Polyline, first int) [3][2]float64 {
 // touchOff touches the pen down at each point in turn and fits the paper's plane.
 func (d *drawer) touchOff(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, at [3]r3.Vector,
-	orientation spatialmath.Orientation, zDown, zUp float64,
+	orientation spatialmath.Orientation, zDown float64,
 ) (*touchPlane, error) {
 	cfg := d.cfg.TouchOff.withDefaults()
 	var found [3]r3.Vector
 	for i, p := range at {
-		z, err := d.touchOne(ctx, fs, run, p, orientation, zDown, zUp, cfg)
+		z, err := d.touchOne(ctx, fs, run, p, orientation, zDown, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("touch-off %d of 3 at (%.1f, %.1f): %w", i+1, p.X, p.Y, err)
 		}
@@ -199,19 +199,22 @@ func (d *drawer) touchOff(
 // stopped it would leave the pen pressing.
 func (d *drawer) touchOne(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, p r3.Vector, orientation spatialmath.Orientation,
-	zDown, zUp float64, cfg TouchOffConfig,
+	zDown float64, cfg TouchOffConfig,
 ) (float64, error) {
 	move := func(z float64, linear, clear bool) error {
 		target := spatialmath.NewPose(r3.Vector{X: p.X, Y: p.Y, Z: z}, orientation)
 		return d.guardedMove(ctx, fs, []spatialmath.Pose{target}, run, linear, clear, nil)
 	}
+	// A free move that also descends can dip below its end on the way, so the
+	// arm crosses between touches high and only comes down straight.
+	travel := zDown + baselineHeightMM
 	lift := func() {
-		up := spatialmath.NewPose(r3.Vector{X: p.X, Y: p.Y, Z: zUp}, orientation)
+		up := spatialmath.NewPose(r3.Vector{X: p.X, Y: p.Y, Z: travel}, orientation)
 		if err := d.planAndExecute(ctx, fs, up, d.constraints(true)); err != nil {
 			d.logger.Warnf("drawer: lift after touch-off: %v", err)
 		}
 	}
-	if err := move(zUp, false, true); err != nil {
+	if err := move(travel, false, true); err != nil {
 		return 0, err
 	}
 	start := zDown + cfg.StartAboveMM
@@ -298,7 +301,7 @@ func (t *touchedPaper) same(paper surface) bool {
 // last one measured, reuses that.
 func (d *drawer) paperPlane(
 	ctx context.Context, fs *referenceframe.FrameSystem, run *forceRun, polylines []Polyline, startAt int,
-	paper surface, zDown, zUp float64,
+	paper surface, zDown float64,
 ) (*touchPlane, error) {
 	if startAt > 0 && d.touched.same(paper) {
 		return d.touched.plane, nil
@@ -309,7 +312,7 @@ func (d *drawer) paperPlane(
 		x, y := paperToWorld(corner, paper.across, p)
 		at[i] = r3.Vector{X: x, Y: y}
 	}
-	plane, err := d.touchOff(ctx, fs, run, at, paper.corner.Orientation(), zDown, zUp)
+	plane, err := d.touchOff(ctx, fs, run, at, paper.corner.Orientation(), zDown)
 	if err != nil {
 		return nil, err
 	}

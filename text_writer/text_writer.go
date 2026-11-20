@@ -330,7 +330,7 @@ func (w *textWriter) write(ctx context.Context, payload interface{}) (map[string
 		return nil, fmt.Errorf("text-writer: %w", err)
 	}
 	w.logger.Infof("text-writer: writing %q, %d strokes", a.Text, len(polylines))
-	draw := map[string]interface{}{"polylines": polylines, "paper": paper}
+	draw := map[string]interface{}{"polylines": polylines, "paper": paper, "finish_at_retreat_pose": true}
 	if w.cfg.StrokeSpeedDegsPerSec > 0 {
 		draw["stroke_speed_degs_per_sec"] = w.cfg.StrokeSpeedDegsPerSec
 	}

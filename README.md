@@ -216,7 +216,9 @@ sheet keeps its plane.
 | `step_mm`, `fine_step_mm` | number | no | Steps before and after the pen first feels the paper. Default 0.2 and 0.05. |
 | `max_depth_mm` | number | no | How far below the configured height a touch may go before it gives up. Default 1.5. |
 
-It needs `force_guard`. Every move down is guarded as in a drawing, so a capped
+It needs `force_guard`. The arm crosses between touches 40 mm above the paper
+and comes straight down to each, since a free move that also descends can dip
+below its end on the way. Every move down is guarded as in a drawing, so a capped
 pen meets the paper on its way to the start of a touch and trips there; the lift
 after each touch is not, since moving away can only ease the force. A touch that
 feels nothing, or a plane steeper than 1 mm per 100 mm, fails the drawing. The
@@ -356,6 +358,10 @@ without the `paper_` prefix:
 
 This is how the [`text-writer`](#viamportrait-drawingtext-writer) puts a name
 on a card beside the portrait paper.
+
+`"finish_at_retreat_pose": true` ends the drawing at `force_guard.retreat_pose`,
+where a person can take the sheet, instead of at `home_pose`. Without a
+`retreat_pose` the arm goes home as usual.
 
 ### `status`
 
@@ -555,7 +561,8 @@ drawer's `draw` verb accepts.
 Writes a line of text on a card — a name on a name tag — through a drawer. It
 lays the text out as polylines in card-local mm, hands them to the drawer's
 `draw` verb along with where the card is, and returns when the drawer does,
-pen up. That blocking contract is what the reception queue's `name_tag_writer`
+pen up. The drawer finishes each name at its `force_guard.retreat_pose`, so the
+card is within reach, or at `home_pose` without one. That blocking contract is what the reception queue's `name_tag_writer`
 expects, so this service is the one to name there.
 
 The card is the writer's own surface. The drawer's paper stays where portraits

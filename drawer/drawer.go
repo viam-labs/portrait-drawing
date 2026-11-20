@@ -153,6 +153,9 @@ type surface struct {
 	// stroke caps the arm on the paper, in degrees; held with the surface so a
 	// drawing resumes at the speed it started at.
 	stroke strokeLimits
+	// park sends the arm to force_guard.retreat_pose when the drawing is done,
+	// rather than to home_pose.
+	park bool
 }
 
 type strokeLimits struct{ speed, acceleration float64 }
@@ -541,25 +544,29 @@ type drawArgs struct {
 	// configured caps for this drawing.
 	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
 	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
+	// FinishAtRetreatPose ends the drawing at force_guard.retreat_pose, where a
+	// person can take the sheet, instead of at home_pose.
+	FinishAtRetreatPose bool `json:"finish_at_retreat_pose,omitempty"`
 }
 
 func (d *drawer) configuredStroke() strokeLimits {
 	return strokeLimits{speed: d.cfg.StrokeSpeedDegsPerSec, acceleration: d.cfg.StrokeAccelerationDegsPerSecPerSec}
 }
 
-func parseStrokeLimits(payload interface{}) (strokeLimits, error) {
+func parseDrawOptions(payload interface{}) (strokeLimits, bool, error) {
 	raw, err := json.Marshal(payload)
 	if err != nil {
-		return strokeLimits{}, fmt.Errorf("marshal payload: %w", err)
+		return strokeLimits{}, false, fmt.Errorf("marshal payload: %w", err)
 	}
 	var args drawArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return strokeLimits{}, fmt.Errorf("parse payload: %w", err)
+		return strokeLimits{}, false, fmt.Errorf("parse payload: %w", err)
 	}
 	if args.StrokeSpeedDegsPerSec < 0 || args.StrokeAccelerationDegsPerSecPerSec < 0 {
-		return strokeLimits{}, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
+		return strokeLimits{}, false, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
 	}
-	return strokeLimits{speed: args.StrokeSpeedDegsPerSec, acceleration: args.StrokeAccelerationDegsPerSecPerSec}, nil
+	limits := strokeLimits{speed: args.StrokeSpeedDegsPerSec, acceleration: args.StrokeAccelerationDegsPerSecPerSec}
+	return limits, args.FinishAtRetreatPose, nil
 }
 
 func parseDrawPayload(payload interface{}) ([]Polyline, int, *Paper, error) {
@@ -1049,11 +1056,12 @@ func (d *drawer) draw(parent context.Context, payload interface{}) (map[string]i
 			return nil, fmt.Errorf("drawer: %w", err)
 		}
 	}
-	limits, err := parseStrokeLimits(payload)
+	limits, park, err := parseDrawOptions(payload)
 	if err != nil {
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
 	paper.stroke = limits.or(d.configuredStroke())
+	paper.park = park
 	ctx, release, err := d.acquireDrawSlot(parent)
 	if err != nil {
 		return nil, err
@@ -1248,8 +1256,9 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	waypoints := drawWaypoints(polylines, startAt, corner, paper.across, zUp, zDown, zClear)
 	run := &forceRun{}
 	defer d.finishForceRun(run)
+	var above spatialmath.Pose
 	if len(waypoints) > 0 {
-		above := spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
+		above = spatialmath.NewPose(r3.Vector{X: waypoints[0].x, Y: waypoints[0].y, Z: zDown + baselineHeightMM}, orientation)
 		run.baseline, err = d.forceBaseline(ctx, fs, above)
 		if err != nil {
 			wrapped := fmt.Errorf("drawer: %w", err)
@@ -1263,7 +1272,13 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	}
 
 	if d.cfg.TouchOff != nil && d.forceGuard != nil && len(waypoints) > 0 {
-		plane, err := d.paperPlane(ctx, fs, run, polylines, startAt, paper, zDown, zUp)
+		plane, err := d.paperPlane(ctx, fs, run, polylines, startAt, paper, zDown)
+		if err == nil {
+			// Back over the first stroke, so the approach to it comes straight down.
+			if err = d.guardedMove(ctx, fs, []spatialmath.Pose{above}, run, false, true, nil); err != nil {
+				err = fmt.Errorf("return over the first stroke: %w", err)
+			}
+		}
 		if err != nil {
 			wrapped := fmt.Errorf("drawer: %w", err)
 			if guardStopped(err) && ctx.Err() == nil {
@@ -1344,7 +1359,12 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 	d.logger.Infof("drawer: finished %d polylines in %s", len(polylines), time.Since(startedAt).Round(time.Second))
 	d.hold(nil, 0, surface{})
 
-	if d.hasRestPose() {
+	if paper.park {
+		if err := d.park(ctx, fs); err != nil {
+			d.setFailed(err)
+			return nil, fmt.Errorf("drawer: park: %w", err)
+		}
+	} else if d.hasRestPose() {
 		if err := d.goToRestPose(ctx, fs); err != nil {
 			d.setFailed(err)
 			return nil, fmt.Errorf("drawer: return to rest pose: %w", err)
