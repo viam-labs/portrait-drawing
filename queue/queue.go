@@ -124,6 +124,12 @@ type CardDispenserConfig struct {
 	// Revolutions feeds exactly one card out; RPM is how fast. Default 60 RPM.
 	Revolutions float64 `json:"revolutions"`
 	RPM         float64 `json:"rpm,omitempty"`
+	// PaperWidthMM, PaperHeightMM and MarginMM size portraits for the
+	// dispenser's drawing area in place of the queue's own, so switching
+	// enabled is all it takes to move between the box and the mat.
+	PaperWidthMM  float64 `json:"paper_width_mm,omitempty"`
+	PaperHeightMM float64 `json:"paper_height_mm,omitempty"`
+	MarginMM      float64 `json:"margin_mm,omitempty"`
 }
 
 func (c *CardDispenserConfig) enabled() bool {
@@ -166,6 +172,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 		}
 		if d.Revolutions <= 0 || d.RPM < 0 {
 			return nil, nil, fmt.Errorf("card_dispenser needs revolutions > 0 and rpm >= 0, got %g and %g", d.Revolutions, d.RPM)
+		}
+		if d.PaperWidthMM < 0 || d.PaperHeightMM < 0 || d.MarginMM < 0 {
+			return nil, nil, errors.New("card_dispenser paper_width_mm, paper_height_mm and margin_mm must be >= 0 (0 keeps the queue's)")
 		}
 		deps = append(deps, d.Motor)
 	}
@@ -284,15 +293,11 @@ func newQueue(ctx context.Context, deps resource.Dependencies, conf resource.Con
 		q.paperSwapWait = 0
 	}
 	if d := cfg.CardDispenser; d.enabled() {
-		if q.dispenser, err = motor.FromProvider(deps, d.Motor); err != nil {
+		m, err := motor.FromProvider(deps, d.Motor)
+		if err != nil {
 			return nil, fmt.Errorf("reception-queue: get card_dispenser.motor %q: %w", d.Motor, err)
 		}
-		q.dispenserCfg = *d
-		if q.dispenserCfg.RPM == 0 {
-			q.dispenserCfg.RPM = defaultDispenserRPM
-		}
-		// The drawn card is fed out, so there is no sheet to swap by hand.
-		q.paperSwapWait = 0
+		q.useDispenser(m, *d)
 	}
 	if cfg.Photo != "" {
 		if q.photo, err = camera.FromProvider(deps, cfg.Photo); err != nil {
@@ -1187,6 +1192,20 @@ func (q *receptionQueue) portraitReturned(ctx context.Context, job *Job, resp ma
 		q.finish(job, stateDone, nil)
 		q.feedCard(ctx)
 	}
+}
+
+// useDispenser puts portraits on the dispenser's card, sized for its drawing area.
+func (q *receptionQueue) useDispenser(f feeder, d CardDispenserConfig) {
+	q.dispenser = f
+	q.dispenserCfg = d
+	if q.dispenserCfg.RPM == 0 {
+		q.dispenserCfg.RPM = defaultDispenserRPM
+	}
+	// The drawn card is fed out, so there is no sheet to swap by hand.
+	q.paperSwapWait = 0
+	q.paperW = orDefault(d.PaperWidthMM, q.paperW)
+	q.paperH = orDefault(d.PaperHeightMM, q.paperH)
+	q.margin = orDefault(d.MarginMM, q.margin)
 }
 
 // feedCard feeds the drawn card out of the dispenser, bringing up the next.

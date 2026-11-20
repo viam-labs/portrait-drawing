@@ -1089,8 +1089,7 @@ func (f *fakeFeeder) count() int {
 
 func withDispenser(h *harness) *fakeFeeder {
 	f := &fakeFeeder{}
-	h.q.dispenser = f
-	h.q.dispenserCfg = CardDispenserConfig{Motor: "card-feeder:feed-motor", Revolutions: 2.5, RPM: 40}
+	h.q.useDispenser(f, CardDispenserConfig{Motor: "card-feeder:feed-motor", Revolutions: 2.5, RPM: 40})
 	return f
 }
 
@@ -1159,4 +1158,13 @@ func TestCardDispenserConfigIsChecked(t *testing.T) {
 	deps, _, err = cfg.Validate("")
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, deps, test.ShouldNotContain, "card-feeder:feed-motor")
+}
+
+func TestTheDispenserSizesPortraitsForItsDrawingArea(t *testing.T) {
+	h := newHarness(t)
+	h.q.useDispenser(&fakeFeeder{}, CardDispenserConfig{Revolutions: 1, PaperWidthMM: 86.3, PaperHeightMM: 120.5, MarginMM: 2})
+	test.That(t, h.q.paperW, test.ShouldEqual, 86.3)
+	test.That(t, h.q.paperH, test.ShouldEqual, 120.5)
+	test.That(t, h.q.margin, test.ShouldEqual, 2.0)
+	test.That(t, h.q.dispenserCfg.RPM, test.ShouldEqual, float64(defaultDispenserRPM))
 }
