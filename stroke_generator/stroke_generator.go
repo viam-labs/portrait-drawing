@@ -53,6 +53,10 @@ type Config struct {
 	// JoinMM draws consecutive strokes as one where the next starts within
 	// this distance of where the last ended. Nil uses 0.75.
 	JoinMM *float64 `json:"join_mm,omitempty"`
+	// EyeScale draws each eye this much larger around its own centre in the
+	// sketch style: a pen's line is about 1 mm and a life-size eye on a card a
+	// few. Nil uses 1.25; 1 draws them life size.
+	EyeScale *float64 `json:"eye_scale,omitempty"`
 
 	// Pointer knobs are nil-as-omitted so the Python pipeline's own default
 	// applies; an explicit 0 is honoured.
@@ -131,6 +135,7 @@ func (cfg *Config) Validate(_ string) ([]string, []string, error) {
 		"crop_below":   cfg.CropBelow,
 		"crop_sides":   cfg.CropSides,
 		"join_mm":      cfg.JoinMM,
+		"eye_scale":    cfg.EyeScale,
 	} {
 		if v != nil && *v < 0 {
 			return nil, nil, fmt.Errorf("%s must be >= 0, got %g", name, *v)
@@ -302,6 +307,7 @@ func (s *strokeGenerator) buildCLIArgs(a *generateArgs) []string {
 		"--crop-below":   s.cfg.CropBelow,
 		"--crop-sides":   s.cfg.CropSides,
 		"--join-mm":      s.cfg.JoinMM,
+		"--eye-scale":    s.cfg.EyeScale,
 	} {
 		if v != nil {
 			args = append(args, flag, strconv.FormatFloat(*v, 'f', -1, 64))
