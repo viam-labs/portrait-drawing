@@ -119,7 +119,7 @@ type CardDispenserConfig struct {
 	// paper finder or the drawer's own paper, keeping the motor's settings.
 	// Default true.
 	Enabled *bool `json:"enabled,omitempty"`
-	// Motor is the feed motor, e.g. "card-feeder:feed-motor" on a remote part.
+	// Motor is the feed motor, by its own name even on a remote part: "feed-motor".
 	Motor string `json:"motor"`
 	// FeedSec runs the motor forward at Power long enough to push the drawn
 	// card out. BackSec then runs it backward at Power, pulling back the next
