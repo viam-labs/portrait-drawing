@@ -211,12 +211,15 @@ type Job struct {
 	Name    string         `json:"name,omitempty"`
 	Visitor map[string]any `json:"visitor,omitempty"`
 	// Write is a text job's payload for the writer's write verb.
-	Write        map[string]any `json:"write,omitempty"`
-	State        string         `json:"state"`
-	Polylines    [][][2]float64 `json:"polylines,omitempty"`
-	Total        int            `json:"polylines_total,omitempty"`
-	NextPolyline int            `json:"next_polyline,omitempty"`
-	Error        string         `json:"error,omitempty"`
+	Write     map[string]any `json:"write,omitempty"`
+	State     string         `json:"state"`
+	Polylines [][][2]float64 `json:"polylines,omitempty"`
+	// DetailFrom is where the facial features start among Polylines, which
+	// the drawer draws slower; nil when the generator marked none.
+	DetailFrom   *int   `json:"detail_from,omitempty"`
+	Total        int    `json:"polylines_total,omitempty"`
+	NextPolyline int    `json:"next_polyline,omitempty"`
+	Error        string `json:"error,omitempty"`
 	// Paper is the sheet the paper finder gave this job, kept so a paused
 	// portrait resumes on the same one. SheetAt is that sheet's centre.
 	Paper      map[string]any `json:"paper,omitempty"`
@@ -457,6 +460,9 @@ func (q *receptionQueue) enqueuePortrait(ctx context.Context, args map[string]an
 	job := &Job{
 		ID: newID(), Kind: kindPortrait, Name: str(args, "name"), Visitor: visitorOf(args),
 		State: stateQueued, Polylines: polylines, Total: len(polylines), CreatedAt: time.Now(),
+	}
+	if from, ok := toInt(resp["detail_from"]); ok && from >= 0 && from < len(polylines) {
+		job.DetailFrom = &from
 	}
 	return q.add(job)
 }
@@ -1152,6 +1158,9 @@ func (q *receptionQueue) runPortrait(ctx, jobCtx context.Context, job *Job) {
 		err  error
 	}
 	draw := map[string]any{"polylines": polylinesArg(job.Polylines), "start_at": start}
+	if job.DetailFrom != nil {
+		draw["detail_from"] = *job.DetailFrom
+	}
 	if job.Paper != nil {
 		draw["paper"] = job.Paper
 	}

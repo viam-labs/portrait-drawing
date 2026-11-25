@@ -315,3 +315,14 @@ func TestBuildCLIArgs_strokeBudget(t *testing.T) {
 	test.That(t, args, test.ShouldContainSubstring, "--max-strokes 90")
 	test.That(t, args, test.ShouldContainSubstring, "--join-mm 0.5")
 }
+
+func TestEyeScaleReachesPythonOnlyWhenSet(t *testing.T) {
+	s := &strokeGenerator{cfg: &Config{}}
+	args := strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldNotContainSubstring, "--eye-scale")
+	s = &strokeGenerator{cfg: &Config{EyeScale: ptr(1.4)}}
+	args = strings.Join(s.buildCLIArgs(&generateArgs{PaperWidthMM: 100, PaperHeightMM: 100}), " ")
+	test.That(t, args, test.ShouldContainSubstring, "--eye-scale 1.4")
+	_, _, err := (&Config{EyeScale: ptr(-1.0)}).Validate("")
+	test.That(t, err.Error(), test.ShouldContainSubstring, "eye_scale")
+}

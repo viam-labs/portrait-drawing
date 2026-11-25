@@ -88,6 +88,12 @@ type Config struct {
 	// runs at the arm's own. A draw may carry its own. 0 leaves the arm's.
 	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
 	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
+	// DetailStrokeSpeedDegsPerSec and DetailStrokeAccelerationDegsPerSecPerSec
+	// cap the strokes a draw marks as detail with detail_from: a face's eyes,
+	// brows and lips, a few mm across, which the arm rounds off at a long
+	// stroke's speed. 0 uses a third of the stroke caps, or 10 and 50.
+	DetailStrokeSpeedDegsPerSec              float64 `json:"detail_stroke_speed_degs_per_sec,omitempty"`
+	DetailStrokeAccelerationDegsPerSecPerSec float64 `json:"detail_stroke_acceleration_degs_per_sec_per_sec,omitempty"`
 	// RemovedForceControl is read only so Validate can reject it: drawing at a
 	// force by correcting between points could not see past the arm's own jolts.
 	RemovedForceControl json.RawMessage `json:"force_control,omitempty"`
@@ -154,9 +160,34 @@ type surface struct {
 	// stroke caps the arm on the paper, in degrees; held with the surface so a
 	// drawing resumes at the speed it started at.
 	stroke strokeLimits
+	// detail caps polylines detailFrom on, when hasDetail.
+	detail     strokeLimits
+	detailFrom int
+	hasDetail  bool
 }
 
 type strokeLimits struct{ speed, acceleration float64 }
+
+const (
+	defaultDetailSpeedDegsPerSec        = 10.0
+	defaultDetailAccelerationDegsPerSec = 50.0
+	// detailStepMM spaces a detail stroke's points: a 3 mm curve needs more than three.
+	detailStepMM = 0.5
+)
+
+// detailLimits is the configured detail caps, or a third of the stroke caps.
+func (d *drawer) detailLimits(stroke strokeLimits) strokeLimits {
+	fallback := strokeLimits{speed: defaultDetailSpeedDegsPerSec, acceleration: defaultDetailAccelerationDegsPerSec}
+	if stroke.speed > 0 {
+		fallback.speed = stroke.speed / 3
+	}
+	if stroke.acceleration > 0 {
+		fallback.acceleration = stroke.acceleration / 3
+	}
+	return strokeLimits{
+		speed: d.cfg.DetailStrokeSpeedDegsPerSec, acceleration: d.cfg.DetailStrokeAccelerationDegsPerSecPerSec,
+	}.or(fallback)
+}
 
 func (l strokeLimits) or(fallback strokeLimits) strokeLimits {
 	if l.speed == 0 {
@@ -255,6 +286,9 @@ func (cfg *Config) Validate(path string) ([]string, []string, error) {
 	}
 	if len(cfg.RemovedForceControl) > 0 {
 		return nil, nil, errors.New("force_control was removed; remove it from the drawer's config, and see touch_off")
+	}
+	if cfg.DetailStrokeSpeedDegsPerSec < 0 || cfg.DetailStrokeAccelerationDegsPerSecPerSec < 0 {
+		return nil, nil, errors.New("detail_stroke_speed_degs_per_sec and detail_stroke_acceleration_degs_per_sec_per_sec must be >= 0")
 	}
 	if cfg.StrokeSpeedDegsPerSec < 0 || cfg.StrokeAccelerationDegsPerSecPerSec < 0 {
 		return nil, nil, errors.New("stroke_speed_degs_per_sec and stroke_acceleration_degs_per_sec_per_sec must be >= 0")
@@ -547,6 +581,24 @@ type drawArgs struct {
 	// configured caps for this drawing.
 	StrokeSpeedDegsPerSec              float64 `json:"stroke_speed_degs_per_sec,omitempty"`
 	StrokeAccelerationDegsPerSecPerSec float64 `json:"stroke_acceleration_degs_per_sec_per_sec,omitempty"`
+	// DetailFrom marks the polylines from this index on as detail, drawn at
+	// the detail caps.
+	DetailFrom *int `json:"detail_from,omitempty"`
+}
+
+func parseDetailFrom(payload any) (*int, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal payload: %w", err)
+	}
+	var args drawArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return nil, fmt.Errorf("parse payload: %w", err)
+	}
+	if args.DetailFrom != nil && *args.DetailFrom < 0 {
+		return nil, errors.New("detail_from must be >= 0")
+	}
+	return args.DetailFrom, nil
 }
 
 func (d *drawer) configuredStroke() strokeLimits {
@@ -1060,6 +1112,14 @@ func (d *drawer) draw(parent context.Context, payload any) (map[string]any, erro
 		return nil, fmt.Errorf("drawer: %w", err)
 	}
 	paper.stroke = limits.or(d.configuredStroke())
+	detailFrom, err := parseDetailFrom(payload)
+	if err != nil {
+		return nil, fmt.Errorf("drawer: %w", err)
+	}
+	if detailFrom != nil {
+		paper.hasDetail, paper.detailFrom = true, *detailFrom
+		paper.detail = d.detailLimits(paper.stroke)
+	}
 	ctx, release, err := d.acquireDrawSlot(parent)
 	if err != nil {
 		return nil, err
@@ -1118,6 +1178,8 @@ type waypoint struct {
 	contact      bool
 	endsPolyline bool
 	label        string
+	polyline     int
+	detail       bool
 }
 
 // drawMove is one planned, uninterrupted motion through one or more points.
@@ -1131,6 +1193,7 @@ type drawMove struct {
 	contactMM    float64
 	endsPolyline bool
 	label        string
+	detail       bool
 }
 
 // maxStrokeStepMM spaces the points a stroke is planned through. The arm moves
@@ -1151,7 +1214,11 @@ func strokeMoves(wps []waypoint) []drawMove {
 		wp := wps[i]
 		mv := drawMove{
 			points: []r3.Vector{{X: wp.x, Y: wp.y, Z: wp.z}},
-			linear: wp.linear, clear: wp.clear, endsPolyline: wp.endsPolyline, label: wp.label,
+			linear: wp.linear, clear: wp.clear, endsPolyline: wp.endsPolyline, label: wp.label, detail: wp.detail,
+		}
+		step := maxStrokeStepMM
+		if wp.detail {
+			step = detailStepMM
 		}
 		if wp.contact {
 			mv.stroke = true
@@ -1161,7 +1228,7 @@ func strokeMoves(wps []waypoint) []drawMove {
 				next := r3.Vector{X: wps[i].x, Y: wps[i].y, Z: wps[i].z}
 				if wps[i].contact {
 					mv.contactMM += mv.points[len(mv.points)-1].Distance(next)
-					mv.points = append(mv.points, along(mv.points[len(mv.points)-1], next, maxStrokeStepMM)...)
+					mv.points = append(mv.points, along(mv.points[len(mv.points)-1], next, step)...)
 				}
 				mv.points = append(mv.points, next)
 				if wps[i].endsPolyline {
@@ -1173,6 +1240,16 @@ func strokeMoves(wps []waypoint) []drawMove {
 		out = append(out, mv)
 	}
 	return out
+}
+
+// markDetail marks the waypoints of the paper's detail polylines.
+func markDetail(wps []waypoint, paper surface) {
+	if !paper.hasDetail {
+		return
+	}
+	for i := range wps {
+		wps[i].detail = wps[i].polyline >= paper.detailFrom
+	}
 }
 
 // along is the points strictly between from and to, no more than step apart.
@@ -1206,22 +1283,22 @@ func drawWaypoints(polylines []Polyline, first int, corner, across r3.Vector, zU
 	for k, poly := range polylines[first:] {
 		i := first + k
 		sx, sy := paperToWorld(corner, across, poly[0])
-		out = append(out, waypoint{x: sx, y: sy, z: zUp, clear: checkContact, label: fmt.Sprintf("polyline %d approach", i)})
+		out = append(out, waypoint{x: sx, y: sy, z: zUp, clear: checkContact, label: fmt.Sprintf("polyline %d approach", i), polyline: i})
 		if checkContact {
-			out = append(out, waypoint{x: sx, y: sy, z: zClear, linear: true, clear: true, label: fmt.Sprintf("polyline %d descent", i)})
+			out = append(out, waypoint{x: sx, y: sy, z: zClear, linear: true, clear: true, label: fmt.Sprintf("polyline %d descent", i), polyline: i})
 		}
-		out = append(out, waypoint{x: sx, y: sy, z: zDown, linear: true, contact: true, label: fmt.Sprintf("polyline %d pen-down", i)})
+		out = append(out, waypoint{x: sx, y: sy, z: zDown, linear: true, contact: true, label: fmt.Sprintf("polyline %d pen-down", i), polyline: i})
 		for j := 1; j < len(poly); j++ {
 			px, py := paperToWorld(corner, across, poly[j])
 			out = append(out, waypoint{
 				x: px, y: py, z: zDown, linear: true, contact: true,
-				label: fmt.Sprintf("polyline %d point %d", i, j),
+				label: fmt.Sprintf("polyline %d point %d", i, j), polyline: i,
 			})
 		}
 		lx, ly := paperToWorld(corner, across, poly[len(poly)-1])
 		out = append(out, waypoint{
 			x: lx, y: ly, z: zUp, linear: true, endsPolyline: true,
-			label: fmt.Sprintf("polyline %d pen-up", i),
+			label: fmt.Sprintf("polyline %d pen-up", i), polyline: i,
 		})
 	}
 	return out
@@ -1305,6 +1382,7 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		pf = &penForce{cfg: d.cfg.PenForce.withDefaults()}
 		defer d.finishPenForce(pf)
 	}
+	markDetail(waypoints, paper)
 	moves := strokeMoves(waypoints)
 	polyStart, redrawn := -1, false
 	for m := 0; m < len(moves); m++ {
@@ -1326,6 +1404,9 @@ func (d *drawer) executeDraw(ctx context.Context, polylines []Polyline, startAt 
 		var options *arm.MoveOptions
 		if mv.linear {
 			options = paper.stroke.moveOptions()
+			if mv.detail {
+				options = paper.detail.moveOptions()
+			}
 		}
 		if err := d.guardedMove(ctx, fs, targets, run, mv.linear, mv.clear, options); err != nil {
 			wrapped := fmt.Errorf("drawer: %s: %w", mv.label, err)

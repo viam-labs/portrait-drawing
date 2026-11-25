@@ -83,3 +83,21 @@ def test_the_threshold_is_configurable(monkeypatch):
     # Allowed through the size check; it then fails later for want of real landmarks.
     with pytest.raises(ValueError, match="no face found"):
         sketch_style.sketch_polylines(img, min_face_fraction=0.01)
+
+
+def test_features_are_drawn_last_and_counted_out():
+    import numpy as np
+    traced = [np.array([[0, 0], [30, 0]]), np.array([[0, 10], [30, 10]]), np.array([[0, 20], [2, 20]])]
+    eye = np.array([[50 + 3 * np.cos(t), 50 + np.sin(t)] for t in np.linspace(0, 2 * np.pi, 40)])
+    out, detail_from = sketch_style.simplify_and_order_with_detail(traced + [eye], n_detail=1, max_strokes=3)
+    # The budget of 3 leaves 2 traced strokes once the eye is counted; the eye comes last.
+    assert detail_from == 2
+    assert len(out) == 3
+    # Lighter simplification keeps a small eye round: far more points than its 0.25 mm cousin.
+    assert len(out[-1]) > len(sketch_style.simplify_and_order([eye])[0])
+
+
+def test_no_features_means_nothing_to_draw_slowly():
+    import numpy as np
+    out, detail_from = sketch_style.simplify_and_order_with_detail([np.array([[0, 0], [30, 0]])], n_detail=0)
+    assert detail_from == len(out)
